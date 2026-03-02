@@ -20,7 +20,7 @@ $(OBJS): Makefile
 
 $(TARGET): $(OBJS)
 	$(LINK.o) $^ $(LOADLIBES) $(LDLIBS) -o $@ 2>&1 | ./ld_gc_sections_to_funcs.py -o funcs-removed.cfg
-	./gcov-strip.py -c funcs-removed.cfg --verbose --list-lines
+	./gcov-strip -c funcs-removed.cfg --verbose --list-lines
 
 run: $(TARGET)
 	./$(TARGET)
