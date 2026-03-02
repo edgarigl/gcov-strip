@@ -243,7 +243,7 @@ def main(argv: List[str]) -> int:
     args = parse_args(argv)
     remove_functions = load_function_list(args.config)
     if not remove_functions:
-        return 0 
+        return 0
 
     changed_files = 0
     total_removed = 0
