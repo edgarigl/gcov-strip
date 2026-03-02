@@ -28,5 +28,6 @@ run: $(TARGET)
 	$(GCOVR)
 
 clean:
-	$(RM) dumps/*
+	$(RM) -r dumps
+	$(RM) funcs-removed.cfg
 	$(RM) $(OBJS) $(TARGET)
