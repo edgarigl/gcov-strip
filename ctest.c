@@ -1,18 +1,21 @@
 #include <stdio.h>
-#include <stdint.h>
 
-volatile int x;
+extern void foo(void);
+extern void bar(void);
 
-void func(int a, int b, int c)
+static void local_bar(void)
 {
-    if (a > 10 && (b || c)) {
-        printf("SET\n");
-        x = 10;
-    }
+    puts("local_bar");
 }
 
-int main(int argc, char *argv[]) {
-    func(11, 20, 0);
-    printf("done\n");
-	return 0;
+int main(void)
+{
+    if (1)
+        foo();
+    else {
+        local_bar();
+        bar();
+    }
+
+    return 0;
 }
