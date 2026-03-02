@@ -1,0 +1,15 @@
+ctest
+dumps
+*.o
+*.gcda
+*.gcno
+coverage*.html
+coverage*.css
+coverage*.js
+coverage*.json
+coverage*.txt
+coverage*.xml
+coverage*.dat
+coverage*.cov
+coverage
+funcs-removed.cfg
