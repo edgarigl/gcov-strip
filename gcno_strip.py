@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 import argparse
+import linecache
 import os
 import struct
 import sys
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 
 GCOV_TAG_FUNCTION = 0x01000000
+GCOV_TAG_LINES = 0x01450000
 GCOV_HEADER_SIZE = 16
 
 
@@ -79,10 +81,37 @@ def parse_function_name(payload: bytes) -> Optional[str]:
     return name
 
 
+def parse_line_record(payload: bytes) -> Dict[str, Set[int]]:
+    if len(payload) < 4:
+        return {}
+    offset = 0
+    offset += 4
+    current_file: Optional[str] = None
+    lines_by_file: Dict[str, Set[int]] = {}
+
+    while offset + 4 <= len(payload):
+        (line_number,) = struct.unpack_from("<I", payload, offset)
+        offset += 4
+        if line_number == 0:
+            filename, offset = read_gcov_string(payload, offset)
+            if filename is None:
+                break
+            if filename == "":
+                break
+            current_file = filename
+            continue
+        if not current_file:
+            continue
+        lines_by_file.setdefault(current_file, set()).add(line_number)
+
+    return lines_by_file
+
+
 def rebuild_gcno(
     data: bytes,
     remove_functions: Set[str],
-) -> Tuple[bytes, int, List[str]]:
+    list_lines: bool = False,
+) -> Tuple[bytes, int, List[str], List[Tuple[str, Dict[str, Set[int]]]]]:
     if len(data) < GCOV_HEADER_SIZE:
         raise ValueError("missing gcno header")
 
@@ -93,6 +122,8 @@ def rebuild_gcno(
     skip_current = False
     removed = 0
     removed_names: List[str] = []
+    removed_lines: List[Tuple[str, Dict[str, Set[int]]]] = []
+    current_removed_lines: Optional[Dict[str, Set[int]]] = None
 
     for tag, payload in iter_gcno_records(data, prefix_end):
         if tag == GCOV_TAG_FUNCTION:
@@ -102,13 +133,24 @@ def rebuild_gcno(
                 removed += 1
                 if name:
                     removed_names.append(name)
+                if list_lines:
+                    label = name if name else "<unknown>"
+                    current_removed_lines = {}
+                    removed_lines.append((label, current_removed_lines))
                 continue
+            current_removed_lines = None
+        if skip_current and list_lines and tag == GCOV_TAG_LINES:
+            if current_removed_lines is not None:
+                parsed = parse_line_record(payload)
+                for filename, lines in parsed.items():
+                    current_removed_lines.setdefault(filename, set()).update(lines)
+            continue
         if skip_current:
             continue
         output.extend(struct.pack("<II", tag, len(payload)))
         output.extend(payload)
 
-    return bytes(output), removed, removed_names
+    return bytes(output), removed, removed_names, removed_lines
 
 
 def find_gcno_files(root: str) -> Iterable[str]:
@@ -119,18 +161,50 @@ def find_gcno_files(root: str) -> Iterable[str]:
 
 
 def process_file(
-    path: str, remove_functions: Set[str]
-) -> Tuple[bool, int, List[str]]:
+    path: str, remove_functions: Set[str], list_lines: bool = False
+) -> Tuple[bool, int, List[str], List[Tuple[str, Dict[str, Set[int]]]]]:
     with open(path, "rb") as handle:
         data = handle.read()
 
-    updated, removed, removed_names = rebuild_gcno(data, remove_functions)
+    updated, removed, removed_names, removed_lines = rebuild_gcno(
+        data, remove_functions, list_lines=list_lines
+    )
     if updated == data:
-        return False, removed, removed_names
+        return False, removed, removed_names, removed_lines
 
     with open(path, "wb") as handle:
         handle.write(updated)
-    return True, removed, removed_names
+    return True, removed, removed_names, removed_lines
+
+
+def resolve_source_path(gcno_path: str, source_name: str) -> str:
+    if os.path.isabs(source_name):
+        return source_name
+    base_dir = os.path.dirname(gcno_path)
+    candidate = os.path.join(base_dir, source_name)
+    if os.path.exists(candidate):
+        return candidate
+    candidate = os.path.join(os.getcwd(), source_name)
+    if os.path.exists(candidate):
+        return candidate
+    return os.path.join(base_dir, source_name)
+
+
+def print_removed_lines(
+    gcno_path: str, removed_lines: List[Tuple[str, Dict[str, Set[int]]]]
+) -> None:
+    for function_name, lines_by_file in removed_lines:
+        if not lines_by_file:
+            continue
+        print(f"removed lines for {function_name} in {gcno_path}:")
+        for filename in sorted(lines_by_file):
+            source_path = resolve_source_path(gcno_path, filename)
+            for line_number in sorted(lines_by_file[filename]):
+                source_line = linecache.getline(source_path, line_number).rstrip("\n")
+                if source_line:
+                    print(f"{filename}:{line_number}: {source_line}")
+                else:
+                    print(f"{filename}:{line_number}")
 
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
@@ -157,6 +231,11 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         action="store_true",
         help="Print per-file removal details.",
     )
+    parser.add_argument(
+        "--list-lines",
+        action="store_true",
+        help="List source lines associated with removed functions.",
+    )
     return parser.parse_args(argv)
 
 
@@ -173,11 +252,13 @@ def main(argv: List[str]) -> int:
             if args.dry_run:
                 with open(path, "rb") as handle:
                     data = handle.read()
-                _, removed, removed_names = rebuild_gcno(data, remove_functions)
+                _, removed, removed_names, removed_lines = rebuild_gcno(
+                    data, remove_functions, list_lines=args.list_lines
+                )
                 changed = removed > 0
             else:
-                changed, removed, removed_names = process_file(
-                    path, remove_functions
+                changed, removed, removed_names, removed_lines = process_file(
+                    path, remove_functions, list_lines=args.list_lines
                 )
         except ValueError as exc:
             print(f"Skipping {path}: {exc}", file=sys.stderr)
@@ -185,6 +266,8 @@ def main(argv: List[str]) -> int:
         if args.verbose and removed_names:
             for name in removed_names:
                 print(f"removed {name} from {path}")
+        if args.list_lines and removed_lines:
+            print_removed_lines(path, removed_lines)
         if removed:
             total_removed += removed
         if changed:
