@@ -19,6 +19,16 @@ This repo contains a minimal example project that:
   any `*.gcno` files under the build directory.
 - `gcovr` uses the updated `gcno` files to produce the coverage report.
 
+## gcno notes overview
+
+`*.gcno` files contain coverage notes emitted at compile time. They record
+the control-flow graph for each function, including basic blocks, arcs
+(directed edges between blocks), and line tables that map blocks back to
+source line numbers. Runtime coverage data is stored separately in `*.gcda`
+files, which hold counters for those blocks/arcs. The `gcov-strip` tool only
+rewrites the `gcno` notes so coverage reports do not reference functions that
+the linker discarded.
+
 ## Example workflow
 
 Build, run, and regenerate coverage output:
