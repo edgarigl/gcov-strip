@@ -19,6 +19,15 @@ This repo contains a minimal example project that:
   any `*.gcno` files under the build directory.
 - `gcovr` uses the updated `gcno` files to produce the coverage report.
 
+If the linker drops inline-only functions, `ld_gc_sections_to_funcs.py` can
+scan DWARF info to detect them using `--dwarf`:
+
+```
+./ld_gc_sections_to_funcs.py -o funcs-removed.cfg --dwarf ctest
+```
+
+Provide multiple `--dwarf` paths to scan several binaries or objects.
+
 ## gcno notes overview
 
 `*.gcno` files contain coverage notes emitted at compile time. They record
