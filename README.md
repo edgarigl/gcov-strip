@@ -28,6 +28,15 @@ scan DWARF info to detect them using `--dwarf`:
 
 Provide multiple `--dwarf` paths to scan several binaries or objects.
 
+### Why DWARF scanning can be needed
+
+GCC emits `*.gcno` notes after early inlining but before some late inlining
+passes. If a helper survives long enough to be instrumented, it can get its own
+`GCOV_TAG_FUNCTION` record even if the compiler later inlines it and removes the
+out-of-line body. In that case the linker log only reports the caller, so the
+inline-only callee remains in the `gcno` file unless `--dwarf` is used to
+discover the inlining relationship.
+
 ## gcno notes overview
 
 `*.gcno` files contain coverage notes emitted at compile time. They record
