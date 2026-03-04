@@ -1,10 +1,12 @@
 #CROSS=$(HOME)/dev/bin/microblazeel-xilinx-elf-
-CC=$(CROSS)gcc-14
-GCOV=gcov-14
+CC=$(CROSS)gcc
+GCOV=gcov
 GCOVR=gcovr --gcov-executable $(GCOV)
 
 CFLAGS = -Wall -O2 -g
-CFLAGS += -ffunction-sections -fdump-tree-all -fdump-ipa-all -dumpdir ./dumps/
+CFLAGS += -ffunction-sections
+CFLAGS += -fkeep-inline-functions
+#CFLAGS += -fdump-tree-all -fdump-ipa-all -dumpdir ./dumps/
 CFLAGS += -fprofile-arcs -ftest-coverage
 #CFLAGS += -fkeep-static-functions
 LDFLAGS += -coverage
