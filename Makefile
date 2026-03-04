@@ -5,10 +5,10 @@ GCOVR=gcovr --gcov-executable $(GCOV)
 
 CFLAGS = -Wall -O2 -g
 CFLAGS += -ffunction-sections
-CFLAGS += -fkeep-inline-functions
 #CFLAGS += -fdump-tree-all -fdump-ipa-all -dumpdir ./dumps/
 CFLAGS += -fprofile-arcs -ftest-coverage
 #CFLAGS += -fkeep-static-functions
+#CFLAGS += -fkeep-inline-functions
 LDFLAGS += -coverage
 LDFLAGS += -Wl,--gc-sections -Wl,--print-gc-sections
 TARGET = ctest
