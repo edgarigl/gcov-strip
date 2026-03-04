@@ -48,7 +48,8 @@ Strip functions listed in `funcs-removed.cfg` and print removed lines:
 ./gcov-strip -c funcs-removed.cfg --list-lines
 ```
 
-Use `--dry-run` to report removals without modifying `*.gcno` files.
+Use multiple `-c` options to combine several config files, and `--dry-run`
+to report removals without modifying `*.gcno` files.
 
 ## Notes
 
