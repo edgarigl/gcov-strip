@@ -1,4 +1,16 @@
 #!/usr/bin/env python3
+#
+# Convert linker `--print-gc-sections` output into a list of function names
+# whose coverage notes should be removed from `.gcno` files.
+#
+# The basic flow is:
+# - scan linker stderr for discarded `.text.<function>` sections
+# - optionally normalize GCC clone suffixes so names line up with gcov notes
+# - optionally inspect DWARF to find inline-only callees whose out-of-line body
+#   disappeared once all callers were garbage-collected
+# - write the final function list to stdout or a config file consumed by
+#   `gcov-strip`
+
 import argparse
 import re
 import subprocess
@@ -41,6 +53,8 @@ def extract_functions(
     normalize_clones: bool,
     echo_stderr: bool,
 ) -> List[str]:
+    # Pull unique function names from linker diagnostics such as:
+    #   removing unused section '.text.foo' in file 'foo.o'
     functions: List[str] = []
     seen: Set[str] = set()
     for line in lines:
@@ -55,6 +69,8 @@ def extract_functions(
             continue
         name = section[text_index + len(".text.") :]
         if normalize_clones:
+            # GCC may emit clone-specific suffixes that should map back to the
+            # original function name when matching against gcov notes.
             clone_match = CLONE_RE.match(name)
             if clone_match:
                 name = clone_match.group("base")
@@ -65,6 +81,8 @@ def extract_functions(
 
 
 def normalize_name(name: str, normalize_clones: bool) -> str:
+    # Normalize names from DWARF/readelf output so they can be compared against
+    # linker-derived names and gcov function records.
     name = name.rstrip(".,")
     name = re.sub(r"/\d+$", "", name)
     if normalize_clones:
@@ -75,6 +93,8 @@ def normalize_name(name: str, normalize_clones: bool) -> str:
 
 
 def iter_readelf(args: List[str]) -> Iterable[str]:
+    # Stream readelf output line-by-line so large DWARF dumps do not need to be
+    # buffered in memory at once.
     try:
         proc = subprocess.Popen(
             args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace"
@@ -91,6 +111,8 @@ def iter_readelf(args: List[str]) -> Iterable[str]:
 
 
 def clean_dwarf_value(value: str) -> str:
+    # readelf often prefixes attribute values with formatting metadata. Strip
+    # that wrapper and keep just the human-readable symbol name.
     value = value.strip()
     if "):" in value:
         value = value.split("):")[-1].strip()
@@ -103,6 +125,9 @@ def resolve_die_name(
     normalize_clones: bool,
     visited: Optional[Set[int]] = None,
 ) -> Optional[str]:
+    # Resolve a DIE name, following specification/abstract_origin links until a
+    # concrete symbol name is found. `visited` prevents cycles in malformed or
+    # unexpected DWARF graphs.
     if visited is None:
         visited = set()
     if offset in visited:
@@ -129,6 +154,12 @@ def parse_dwarf_data(
     paths: Iterable[str],
     normalize_clones: bool,
 ) -> Tuple[Dict[str, Set[str]], Set[str]]:
+    # Build two indexes from DWARF:
+    # - inline callee -> set of callers that inline it
+    # - functions that still have an out-of-line code range somewhere
+    #
+    # A function can be safely treated as "inline-only removed" when it has no
+    # out-of-line definition but every caller that inlined it was removed.
     inlined_callers: Dict[str, Set[str]] = defaultdict(set)
     defined: Set[str] = set()
     for path in paths:
@@ -144,6 +175,8 @@ def parse_dwarf_data(
                 while len(stack) > depth:
                     stack.pop()
                 parent = stack[-1] if stack else None
+                # Keep a lightweight representation of each DIE so later passes
+                # can resolve names and walk parent relationships.
                 die_by_offset[offset] = {
                     "tag": tag,
                     "name": None,
@@ -159,6 +192,8 @@ def parse_dwarf_data(
             if current_offset is None:
                 continue
             if DWARF_LOW_PC_RE.search(line) or DWARF_RANGES_RE.search(line):
+                # Treat any concrete code range as evidence that the function
+                # still exists out-of-line and should not be auto-removed.
                 die_by_offset[current_offset]["has_code"] = True
                 continue
             match = DWARF_NAME_RE.search(line)
@@ -203,6 +238,8 @@ def parse_dwarf_data(
                 if not parent_die:
                     break
                 if parent_die.get("tag") == "DW_TAG_subprogram":
+                    # Walk up until we find the containing subprogram; that is
+                    # the out-of-line function that performed the inline call.
                     caller = resolve_die_name(parent, die_by_offset, normalize_clones)
                     break
                 parent = parent_die.get("parent")
@@ -216,6 +253,8 @@ def find_inline_only_functions(
     inline_info: Dict[str, Set[str]],
     defined_functions: Set[str],
 ) -> Set[str]:
+    # Infer extra removals for callees that only survive as inlined DWARF
+    # entries and whose every caller is already known to be discarded.
     extra: Set[str] = set()
     for callee, callers in inline_info.items():
         if not callers or callee in remove_functions:
@@ -228,6 +267,8 @@ def find_inline_only_functions(
 
 
 def main() -> int:
+    # Glue the linker parser and optional DWARF analysis together, then emit a
+    # flat text list suitable for `gcov-strip`.
     parser = argparse.ArgumentParser(
         description="Extract removed function names from ld --print-gc-sections output."
     )
