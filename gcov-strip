@@ -13,7 +13,8 @@ import linecache
 import os
 import struct
 import sys
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from collections import defaultdict
+from typing import DefaultDict, Dict, Iterable, List, Optional, Set, Tuple
 
 
 GCOV_TAG_FUNCTION = 0x01000000
@@ -21,17 +22,70 @@ GCOV_TAG_LINES = 0x01450000
 GCOV_HEADER_SIZE = 16
 
 
-def load_function_list(path: str) -> Set[str]:
-    # Read a flat text config file of function names, ignoring blank lines and
+def parse_config_entry(line: str) -> Tuple[Optional[str], str]:
+    # Support both legacy `function` entries and newer `object:function`
+    # entries. Object-qualified lines restrict removals to the matching gcno.
+    if ":" not in line:
+        return None, line
+    obj_path, function = line.rsplit(":", 1)
+    if not obj_path or not function:
+        return None, line
+    return os.path.normpath(obj_path), function
+
+
+def load_function_list(
+    path: str,
+) -> Tuple[Set[str], DefaultDict[str, Set[str]]]:
+    # Read a flat text config file of removals, ignoring blank lines and
     # comments so generated configs can include annotations.
     functions: Set[str] = set()
+    functions_by_object: DefaultDict[str, Set[str]] = defaultdict(set)
     with open(path, "r", encoding="utf-8") as handle:
         for line in handle:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
-            functions.add(stripped)
-    return functions
+            obj_path, function = parse_config_entry(stripped)
+            if obj_path is None:
+                functions.add(function)
+            else:
+                functions_by_object[obj_path].add(function)
+    return functions, functions_by_object
+
+
+def gcno_object_keys(path: str) -> Set[str]:
+    # Derive the object names that may correspond to this gcno file. Relative
+    # paths are preferred so generated configs remain stable across workspaces.
+    abs_gcno = os.path.abspath(path)
+    rel_gcno = os.path.relpath(abs_gcno, os.getcwd())
+    keys = set()
+    for gcno_path in {abs_gcno, rel_gcno, os.path.basename(rel_gcno)}:
+        if gcno_path.endswith(".gcno"):
+            # Try a few path spellings because linker logs and generated config
+            # files may record the same object as an absolute path, a cwd-
+            # relative path, or just a basename.
+            keys.add(os.path.normpath(gcno_path[:-5] + ".o"))
+    return keys
+
+
+def removal_set_for_gcno(
+    path: str,
+    global_functions: Set[str],
+    functions_by_object: DefaultDict[str, Set[str]],
+    require_object_match: bool,
+) -> Set[str]:
+    # Combine legacy global removals with object-qualified removals that match
+    # the gcno currently being processed.
+    matched = set()
+    for key in gcno_object_keys(path):
+        matched.update(functions_by_object.get(key, set()))
+    if require_object_match:
+        # Strict scoping mode ignores legacy bare names entirely and only strips
+        # functions explicitly tied to this gcno's object identity.
+        return matched
+    # Backward-compatible mode keeps honoring legacy bare-name entries while
+    # also narrowing newer `object:function` entries to the matching gcno.
+    return set(global_functions) | matched
 
 
 def record_start_offset(data: bytes) -> int:
@@ -275,6 +329,14 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         action="store_true",
         help="List source lines associated with removed functions.",
     )
+    parser.add_argument(
+        "--require-object-match",
+        action="store_true",
+        help=(
+            "Only honor object-qualified `object:function` config entries for "
+            "the current gcno file; ignore legacy bare-name entries."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -283,25 +345,40 @@ def main(argv: List[str]) -> int:
     # current working directory.
     args = parse_args(argv)
     remove_functions: Set[str] = set()
+    functions_by_object: DefaultDict[str, Set[str]] = defaultdict(set)
     for path in args.config:
-        remove_functions.update(load_function_list(path))
-    if not remove_functions:
+        global_functions, object_functions = load_function_list(path)
+        remove_functions.update(global_functions)
+        for obj_path, names in object_functions.items():
+            functions_by_object[obj_path].update(names)
+    if not remove_functions and not functions_by_object:
         return 0
 
     changed_files = 0
     total_removed = 0
     for path in find_gcno_files(os.getcwd()):
+        remove_for_file = removal_set_for_gcno(
+            path,
+            remove_functions,
+            functions_by_object,
+            args.require_object_match,
+        )
+        if not remove_for_file:
+            # Skip unrelated gcno files entirely once the config becomes
+            # object-qualified; this is the main behavioral change from the old
+            # global name-only matching.
+            continue
         try:
             if args.dry_run:
                 with open(path, "rb") as handle:
                     data = handle.read()
                 _, removed, removed_names, removed_lines = rebuild_gcno(
-                    data, remove_functions, list_lines=args.list_lines
+                    data, remove_for_file, list_lines=args.list_lines
                 )
                 changed = removed > 0
             else:
                 changed, removed, removed_names, removed_lines = process_file(
-                    path, remove_functions, list_lines=args.list_lines
+                    path, remove_for_file, list_lines=args.list_lines
                 )
         except ValueError as exc:
             print(f"Skipping {path}: {exc}", file=sys.stderr)

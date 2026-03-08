@@ -12,15 +12,16 @@
 #   `gcov-strip`
 
 import argparse
+import os
 import re
 import subprocess
 import sys
 from collections import defaultdict
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import DefaultDict, Dict, Iterable, List, Optional, Set, Tuple
 
 
-SECTION_RE = re.compile(
-    r"removing unused section '([^']+)'", re.IGNORECASE
+REMOVAL_RE = re.compile(
+    r"removing unused section '([^']+)' in file '([^']+)'", re.IGNORECASE
 )
 CLONE_SUFFIXES = (
     "constprop",
@@ -46,24 +47,33 @@ DWARF_SPECIFICATION_RE = re.compile(
 )
 DWARF_LOW_PC_RE = re.compile(r"DW_AT_low_pc\b")
 DWARF_RANGES_RE = re.compile(r"DW_AT_ranges\b")
+NM_LINE_RE = re.compile(
+    r"^(?:[0-9A-Fa-f]+\s+)?(?P<type>[A-Za-z])\s+(?P<name>\S+)$"
+)
+AGGREGATE_OBJECT_BASENAMES = {
+    "built_in.o",
+    "prelink.o",
+    "libfdt.o",
+    "libfdt-temp.o",
+}
 
 
 def extract_functions(
     lines: Iterable[str],
     normalize_clones: bool,
     echo_stderr: bool,
-) -> List[str]:
-    # Pull unique function names from linker diagnostics such as:
+) -> List[Tuple[str, Optional[str]]]:
+    # Pull unique `(function, object)` pairs from linker diagnostics such as:
     #   removing unused section '.text.foo' in file 'foo.o'
-    functions: List[str] = []
-    seen: Set[str] = set()
+    functions: List[Tuple[str, Optional[str]]] = []
+    seen: Set[Tuple[str, Optional[str]]] = set()
     for line in lines:
         if echo_stderr:
             sys.stderr.write(line)
-        match = SECTION_RE.search(line)
+        match = REMOVAL_RE.search(line)
         if not match:
             continue
-        section = match.group(1)
+        section, obj_path = match.groups()
         text_index = section.rfind(".text.")
         if text_index == -1:
             continue
@@ -74,10 +84,149 @@ def extract_functions(
             clone_match = CLONE_RE.match(name)
             if clone_match:
                 name = clone_match.group("base")
-        if name not in seen:
-            seen.add(name)
-            functions.append(name)
+        entry = (name, normalize_object_path(obj_path))
+        if entry not in seen:
+            seen.add(entry)
+            functions.append(entry)
     return functions
+
+
+def normalize_object_path(path: str) -> str:
+    # Normalize linker-reported object paths into stable relative keys when
+    # possible so they can be matched against gcno locations later.
+    normalized = os.path.normpath(path)
+    if os.path.isabs(normalized):
+        try:
+            return os.path.relpath(normalized, os.getcwd())
+        except ValueError:
+            return normalized
+    return normalized
+
+
+def is_aggregate_object(path: str) -> bool:
+    # Aggregate objects collect many leaf objects into one partial link and do
+    # not map 1:1 onto a single gcno file.
+    return os.path.basename(path) in AGGREGATE_OBJECT_BASENAMES
+
+
+def iter_object_files(root: str) -> Iterable[str]:
+    for base, _, files in os.walk(root):
+        for filename in files:
+            if filename.endswith(".o"):
+                yield os.path.join(base, filename)
+
+
+def build_object_symbol_index(
+    root: str,
+    interesting_names: Set[str],
+    normalize_clones: bool,
+) -> DefaultDict[str, Set[str]]:
+    # Index leaf object definitions for the names we care about so aggregate
+    # linker removals like `prelink.o:foo` can be mapped back to `bar.o:foo`.
+    by_name: DefaultDict[str, Set[str]] = defaultdict(set)
+    for obj_path in iter_object_files(root):
+        rel_path = normalize_object_path(obj_path)
+        if is_aggregate_object(rel_path):
+            continue
+        try:
+            output = subprocess.check_output(
+                ["nm", "-a", obj_path],
+                text=True,
+                errors="replace",
+                stderr=subprocess.DEVNULL,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+            raise RuntimeError(f"nm failed for {obj_path}") from exc
+        seen_in_object: Set[str] = set()
+        for line in output.splitlines():
+            match = NM_LINE_RE.match(line.strip())
+            if not match:
+                continue
+            symbol_type = match.group("type")
+            if symbol_type not in {"T", "t", "W", "w"}:
+                continue
+            name = normalize_name(match.group("name"), normalize_clones)
+            if name not in interesting_names or name in seen_in_object:
+                continue
+            by_name[name].add(rel_path)
+            seen_in_object.add(name)
+    return by_name
+
+
+def resolve_removed_entries(
+    removed_entries: List[Tuple[str, Optional[str]]],
+    normalize_clones: bool,
+    strict: bool,
+) -> Tuple[List[str], List[str], List[str]]:
+    # Resolve linker removals into config lines. Direct leaf objects become
+    # `object:function`; aggregate objects are mapped back to leaf objects via a
+    # symbol index. Ambiguous or unresolved entries are emitted as commented
+    # review notes unless strict mode is enabled.
+    interesting_names = {name for name, _ in removed_entries}
+    symbol_index = build_object_symbol_index(os.getcwd(), interesting_names, normalize_clones)
+
+    resolved_lines: List[str] = []
+    warnings: List[str] = []
+    review_lines: List[str] = []
+    seen_lines: Set[str] = set()
+
+    for name, obj_path in removed_entries:
+        candidate_lines: List[str] = []
+        if obj_path and not is_aggregate_object(obj_path):
+            # Leaf objects already line up with a single gcno file, so they can
+            # be emitted directly as scoped `object:function` removals.
+            candidate_lines = [f"{obj_path}:{name}"]
+        else:
+            leaf_objects = sorted(symbol_index.get(name, set()))
+            if len(leaf_objects) == 1:
+                # Aggregate link steps like `prelink.o` do not identify the gcno
+                # to rewrite, so remap the name back to its sole leaf object.
+                candidate_lines = [f"{leaf_objects[0]}:{name}"]
+            elif len(leaf_objects) > 1:
+                joined = ", ".join(leaf_objects)
+                warnings.append(
+                    f"Ambiguous removal for {name}: {obj_path or '<unknown object>'} "
+                    f"matches multiple leaf objects ({joined})"
+                )
+                if strict:
+                    continue
+                # Leave ambiguous removals commented out by default so the
+                # generated config is safe to consume without stripping coverage
+                # from every gcno that happens to share the same function name.
+                review_lines.extend(
+                    [
+                        f"# REVIEW ambiguous removal for {name} from {obj_path or '<unknown object>'}",
+                        f"# candidates: {joined}",
+                        f"# {name}",
+                    ]
+                )
+            else:
+                warnings.append(
+                    f"Could not resolve {name} from {obj_path or '<unknown object>'} "
+                    "to a leaf object"
+                )
+                if strict:
+                    continue
+                # Keep unresolved names out of the active config for the same
+                # reason as ambiguous ones: a bare-name fallback would widen the
+                # removal scope beyond what the linker actually proved.
+                review_lines.extend(
+                    [
+                        f"# REVIEW unresolved removal for {name} from {obj_path or '<unknown object>'}",
+                        "# candidates: none",
+                        f"# {name}",
+                    ]
+                )
+        for line in candidate_lines:
+            if line not in seen_lines:
+                seen_lines.add(line)
+                resolved_lines.append(line)
+
+    if strict and warnings:
+        raise RuntimeError(
+            "strict object matching failed:\n" + "\n".join(warnings)
+        )
+    return resolved_lines, warnings, review_lines
 
 
 def normalize_name(name: str, normalize_clones: bool) -> str:
@@ -290,6 +439,15 @@ def main() -> int:
         help="Write function list to this file instead of stdout.",
     )
     parser.add_argument(
+        "--strict-object-match",
+        action="store_true",
+        help=(
+            "Fail if a discarded function cannot be resolved to a single leaf "
+            "object file. Without this flag, unresolved entries fall back to "
+            "legacy bare-name output."
+        ),
+    )
+    parser.add_argument(
         "--dwarf",
         action="append",
         default=[],
@@ -300,13 +458,36 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    functions = extract_functions(sys.stdin, args.normalize_clones, not args.quiet)
+    try:
+        removed_entries = extract_functions(sys.stdin, args.normalize_clones, not args.quiet)
+        functions, warnings, review_lines = resolve_removed_entries(
+            removed_entries, args.normalize_clones, args.strict_object_match
+        )
+        for warning in warnings:
+            print(f"warning: {warning}", file=sys.stderr)
+
+        removed_function_names = {name for name, _ in removed_entries}
+        inline_only: List[str] = []
+        if args.dwarf:
+            inlined, defined = parse_dwarf_data(args.dwarf, args.normalize_clones)
+            inline_only_names = sorted(
+                find_inline_only_functions(removed_function_names, inlined, defined)
+            )
+            resolved_inline, inline_warnings, inline_review_lines = resolve_removed_entries(
+                [(name, None) for name in inline_only_names],
+                args.normalize_clones,
+                args.strict_object_match,
+            )
+            for warning in inline_warnings:
+                print(f"warning: {warning}", file=sys.stderr)
+            review_lines.extend(inline_review_lines)
+            inline_only = resolved_inline
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
     seen = set(functions)
-    inline_only: List[str] = []
-    if args.dwarf:
-        inlined, defined = parse_dwarf_data(args.dwarf, args.normalize_clones)
-        inline_only = sorted(find_inline_only_functions(seen, inlined, defined))
-        seen.update(inline_only)
+    seen.update(inline_only)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as handle:
             for name in functions:
@@ -315,6 +496,10 @@ def main() -> int:
                 handle.write("\n# Detected inline functions by DWARF scanning\n")
                 for name in inline_only:
                     handle.write(f"{name}\n")
+            if review_lines:
+                handle.write("\n")
+                for line in review_lines:
+                    handle.write(f"{line}\n")
     else:
         for name in functions:
             print(name)
@@ -322,6 +507,10 @@ def main() -> int:
             print("\n# Detected inline functions by DWARF scanning")
             for name in inline_only:
                 print(name)
+        if review_lines:
+            print()
+            for line in review_lines:
+                print(line)
     return 0
 
 

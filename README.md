@@ -15,9 +15,18 @@ This repo contains a minimal example project that:
 
 - `ld_gc_sections_to_funcs.py` parses the linker output and writes
   `funcs-removed.cfg` with functions removed by garbage collection.
+  When possible it writes `object:function` entries so removals are scoped
+  to the matching `*.gcno` file instead of applying globally by name.
 - `gcov-strip` reads that config and removes those function records from
   any `*.gcno` files under the build directory.
 - `gcovr` uses the updated `gcno` files to produce the coverage report.
+
+If the linker reports discarded code from an aggregate object such as
+`prelink.o` or `built_in.o`, `ld_gc_sections_to_funcs.py` scans leaf `*.o`
+files under the build tree and tries to map each removed name back to a
+single object. If that mapping is ambiguous, it prints a warning and falls
+back to a commented `# REVIEW ...` entry for human review unless
+`--strict-object-match` is used.
 
 If the linker drops inline-only functions, `ld_gc_sections_to_funcs.py` can
 scan DWARF info to detect them using `--dwarf`:
@@ -68,6 +77,39 @@ Strip functions listed in `funcs-removed.cfg` and print removed lines:
 
 Use multiple `-c` options to combine several config files, and `--dry-run`
 to report removals without modifying `*.gcno` files.
+
+Use `--require-object-match` to ignore legacy bare-name entries and only
+apply object-qualified removals to the corresponding `*.gcno` file.
+
+## Object-qualified config format
+
+Generated configs may contain either of these line formats:
+
+```
+foo
+common/bar.o:foo
+```
+
+- `foo` is the legacy global form and removes `foo` from any matching
+  `*.gcno` file. `gcov-strip` still accepts it for backward compatibility.
+- `common/bar.o:foo` removes `foo` only while rewriting `common/bar.gcno`.
+
+When object resolution is ambiguous or impossible, generated configs now
+contain commented review notes instead of an unsafe bare-name fallback:
+
+```
+# REVIEW ambiguous removal for merge from prelink.o
+# candidates: common/rangeset.o, lib/list-sort.o
+# merge
+```
+
+## Strict modes
+
+- `ld_gc_sections_to_funcs.py --strict-object-match` fails instead of falling
+  back to a commented review entry when a removed symbol cannot be mapped to a
+  single leaf object.
+- `gcov-strip --require-object-match` ignores legacy bare-name config entries
+  and only applies object-qualified entries to matching `*.gcno` files.
 
 ## Notes
 
