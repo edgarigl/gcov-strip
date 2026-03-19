@@ -10,6 +10,16 @@
 #   disappeared once all callers were garbage-collected
 # - write the final function list to stdout or a config file consumed by
 #   `gcov-strip`
+#
+# The DWARF approach is intentionally conservative. It does not try to rebuild
+# full linker provenance. Instead it asks a narrower question:
+# - which inlined callees are described only as inline expansions in DWARF?
+# - which out-of-line callers contain those inline expansions?
+# - can both sides be mapped back to a concrete leaf object with a gcno file?
+# If the callee has no concrete code range of its own and every observed caller
+# was already removed by the linker, the callee becomes a candidate for gcno
+# stripping as well. Missing or ambiguous object provenance leaves the entry in
+# review-only form instead of widening the removal scope.
 
 import argparse
 import os
@@ -35,17 +45,32 @@ CLONE_RE = re.compile(
 DIE_RE = re.compile(
     r"^\s*<(?P<depth>\d+)><(?P<offset>[0-9a-fA-F]+)>: Abbrev Number: \d+ \((?P<tag>[^)]+)\)"
 )
+# `DW_AT_name` is the generic source-level name field. Depending on the DIE, it
+# may describe a compile unit's source file or a function's unmangled name.
 DWARF_NAME_RE = re.compile(r"DW_AT_name\s*:\s*(?P<value>.+)")
+# `DW_AT_comp_dir` gives the compilation directory for a compile unit so a
+# relative `DW_AT_name` source path can be turned back into a likely object/gcno
+# location.
 DWARF_COMP_DIR_RE = re.compile(r"DW_AT_comp_dir\s*:\s*(?P<value>.+)")
+# `DW_AT_linkage_name` / `DW_AT_MIPS_linkage_name` carry the linker-visible
+# symbol name when the plain source-level `DW_AT_name` is not unique enough.
 DWARF_LINKAGE_RE = re.compile(
     r"DW_AT_(?:linkage_name|MIPS_linkage_name)\s*:\s*(?P<value>.+)"
 )
+# `DW_AT_abstract_origin` points from an inline expansion or cloned concrete
+# DIE back to the abstract DIE that owns the callee identity.
 DWARF_ABSTRACT_ORIGIN_RE = re.compile(
     r"DW_AT_abstract_origin\s*:\s*(?:\([^)]*\)\s*)?<0x(?P<offset>[0-9a-fA-F]+)>"
 )
+# `DW_AT_specification` points from a concrete definition to a separate
+# declaration DIE that may carry the canonical source-level name.
 DWARF_SPECIFICATION_RE = re.compile(
     r"DW_AT_specification\s*:\s*(?:\([^)]*\)\s*)?<0x(?P<offset>[0-9a-fA-F]+)>"
 )
+# `DW_AT_low_pc` and `DW_AT_ranges` are the simplest cross-toolchain signals
+# that a subprogram still has concrete machine code in the final DWARF view.
+# If either is present, we treat the function as still having an out-of-line
+# body and therefore not safe to auto-remove as "inline-only".
 DWARF_LOW_PC_RE = re.compile(r"DW_AT_low_pc\b")
 DWARF_RANGES_RE = re.compile(r"DW_AT_ranges\b")
 NM_LINE_RE = re.compile(
@@ -60,6 +85,15 @@ def extract_functions(
 ) -> List[Tuple[str, Optional[str]]]:
     # Pull unique `(function, object)` pairs from linker diagnostics such as:
     #   removing unused section '.text.foo' in file 'foo.o'
+    #
+    # Args:
+    # - lines: linker output lines, usually stderr from the final link step.
+    # - normalize_clones: collapse GCC clone suffixes back to the base function
+    #   name so linker removals can be matched against gcov and DWARF names.
+    # - echo_stderr: reprint the input line to stderr while parsing.
+    #
+    # Returns:
+    # - a stable-order list of unique `(function_name, object_path)` tuples.
     functions: List[Tuple[str, Optional[str]]] = []
     seen: Set[Tuple[str, Optional[str]]] = set()
     for line in lines:
@@ -102,6 +136,12 @@ def object_gcno_candidates(path: str) -> Set[str]:
     # Linker diagnostics may report object paths in a few different forms. Try
     # the same path spellings when looking for the gcno file that would be
     # rewritten for an object-qualified removal.
+    #
+    # Args:
+    # - path: an object path from linker output or DWARF-derived provenance.
+    #
+    # Returns:
+    # - possible `.gcno` paths that might correspond to that object.
     normalized = normalize_object_path(path)
     candidates = {normalized}
     if not os.path.isabs(normalized):
@@ -127,6 +167,15 @@ def object_from_source_path(source_name: str, comp_dir: Optional[str]) -> Option
     # builds the object and gcno live next to the source path inside the build
     # tree, so try the obvious `.c -> .o` style translations and keep the first
     # one that actually has a matching gcno.
+    #
+    # Args:
+    # - source_name: compile-unit source path from `DW_AT_name`.
+    # - comp_dir: compile-unit working directory from `DW_AT_comp_dir`, or
+    #   `None` when DWARF does not provide it.
+    #
+    # Returns:
+    # - the first object path that appears to own the corresponding gcno, or
+    #   `None` when the source file cannot be mapped back to a leaf object.
     candidates: List[str] = []
     if os.path.isabs(source_name):
         candidates.append(source_name)
@@ -160,6 +209,17 @@ def build_object_symbol_index(
 ) -> DefaultDict[str, Set[str]]:
     # Index leaf object definitions for the names we care about so aggregate
     # linker removals like `prelink.o:foo` can be mapped back to `bar.o:foo`.
+    #
+    # Args:
+    # - root: build-tree root to scan recursively for leaf object files.
+    # - interesting_names: only these symbol names are indexed to keep the `nm`
+    #   scan bounded to names that actually matter for the current run.
+    # - normalize_clones: whether clone suffixes should be collapsed while
+    #   indexing names from `nm`.
+    #
+    # Returns:
+    # - `function_name -> {object_path, ...}` for leaf objects that appear to
+    #   define the function and also have a matching gcno file.
     by_name: DefaultDict[str, Set[str]] = defaultdict(set)
     for obj_path in iter_object_files(root):
         rel_path = normalize_object_path(obj_path)
@@ -199,6 +259,20 @@ def resolve_removed_entries(
     # `object:function`; aggregate objects are mapped back to leaf objects via a
     # symbol index. Ambiguous or unresolved entries are emitted as commented
     # review notes unless strict mode is enabled.
+    #
+    # Args:
+    # - removed_entries: linker- or DWARF-derived `(function, object_hint)`
+    #   tuples. `object_hint` may be `None` or may point at an intermediate
+    #   object that does not own a gcno directly.
+    # - normalize_clones: whether clone suffixes should be normalized while
+    #   building the leaf-object symbol index.
+    # - strict: if true, unresolved or ambiguous mappings raise an error instead
+    #   of being emitted as commented review entries.
+    #
+    # Returns:
+    # - active config lines safe for `gcov-strip`
+    # - warning messages describing ambiguous or unresolved cases
+    # - commented review lines to append to the generated config
     interesting_names = {name for name, _ in removed_entries}
     symbol_index = build_object_symbol_index(os.getcwd(), interesting_names, normalize_clones)
 
@@ -324,9 +398,27 @@ def resolve_die_name(
     normalize_clones: bool,
     visited: Optional[Set[int]] = None,
 ) -> Optional[str]:
-    # Resolve a DIE name, following specification/abstract_origin links until a
-    # concrete symbol name is found. `visited` prevents cycles in malformed or
-    # unexpected DWARF graphs.
+    # Resolve a DIE name, following `DW_AT_specification` and
+    # `DW_AT_abstract_origin` links until a concrete symbol name is found.
+    #
+    # - `DW_AT_specification` typically connects a concrete definition back to a
+    #   separate declaration DIE that owns the canonical name.
+    # - `DW_AT_abstract_origin` typically connects an inlined instance or cloned
+    #   concrete DIE back to the abstract origin DIE that owns the canonical
+    #   inline-subroutine identity.
+    #
+    # `visited` prevents cycles in malformed or unexpected DWARF graphs.
+    #
+    # Args:
+    # - offset: DIE offset to resolve.
+    # - die_by_offset: parsed DWARF DIE table for one input file.
+    # - normalize_clones: whether clone suffixes should be stripped from the
+    #   final symbol name.
+    # - visited: recursion guard for origin/specification chains.
+    #
+    # Returns:
+    # - the best normalized symbol name for the DIE, or `None` if no name can be
+    #   recovered.
     if visited is None:
         visited = set()
     if offset in visited:
@@ -353,9 +445,22 @@ def die_object_hint(
     die: Dict[str, object],
     die_by_offset: Dict[int, Dict[str, object]],
 ) -> Optional[str]:
-    # Resolve a DWARF DIE back to the leaf object that should own its gcno. The
-    # object hint comes from the containing compile unit's source path unless we
-    # are already scanning a leaf object file directly.
+    # Resolve a DWARF DIE back to the leaf object that should own its gcno.
+    #
+    # The best case is reading DWARF from a leaf object file directly, in which
+    # case the object path is already known. When scanning a linked image, the
+    # fallback is the containing compile unit: `DW_AT_name` gives the source
+    # file and `DW_AT_comp_dir` anchors relative paths so they can be converted
+    # back into the likely `foo.o -> foo.gcno` location.
+    #
+    # Args:
+    # - die: the DIE whose owning object is being inferred.
+    # - die_by_offset: parsed DWARF DIE table used to find the containing
+    #   compile unit.
+    #
+    # Returns:
+    # - a leaf object path that appears to own the corresponding gcno, or
+    #   `None` if provenance is too weak to scope safely.
     direct_object = die.get("dwarf_object")
     if isinstance(direct_object, str) and object_has_matching_gcno(direct_object):
         return normalize_object_path(direct_object)
@@ -385,6 +490,18 @@ def resolve_die_identity(
     # Resolve both the symbol name and the object hint for a DIE. This keeps
     # DWARF-derived inline removals scoped to one gcno when compile-unit
     # provenance is good enough to identify the leaf object.
+    #
+    # Args:
+    # - offset: DIE offset to resolve.
+    # - die_by_offset: parsed DWARF DIE table for one input file.
+    # - normalize_clones: whether clone suffixes should be stripped from the
+    #   recovered symbol name.
+    # - visited: recursion guard for origin/specification chains.
+    #
+    # Returns:
+    # - `(function_name, object_hint)` when both the name and any available
+    #   object provenance have been resolved, or `None` when the DIE cannot be
+    #   identified.
     if visited is None:
         visited = set()
     if offset in visited:
@@ -419,6 +536,15 @@ def parse_dwarf_data(
     #
     # A function can be safely treated as "inline-only removed" when it has no
     # out-of-line definition but every caller that inlined it was removed.
+    #
+    # Args:
+    # - paths: binaries or object files whose DWARF info should be scanned.
+    # - normalize_clones: whether clone suffixes should be normalized while
+    #   recovering function identities.
+    #
+    # Returns:
+    # - `inline_callee -> {caller, ...}` for inline expansions observed in DWARF
+    # - the set of functions that still appear to have concrete out-of-line code
     inlined_callers: Dict[Tuple[str, Optional[str]], Set[Tuple[str, Optional[str]]]] = defaultdict(set)
     defined: Set[Tuple[str, Optional[str]]] = set()
     for path in paths:
@@ -468,28 +594,39 @@ def parse_dwarf_data(
                 value = clean_dwarf_value(match.group("value"))
                 die_by_offset[current_offset]["name"] = value
                 if die_by_offset[current_offset].get("tag") == "DW_TAG_compile_unit":
+                    # For compile units, `DW_AT_name` is the source file name.
+                    # Later we combine it with `DW_AT_comp_dir` to recover the
+                    # leaf object/gcno path for DWARF-derived removals.
                     die_by_offset[current_offset]["cu_name"] = value
                     die_by_offset[current_offset]["cu_offset"] = current_offset
                 continue
             match = DWARF_COMP_DIR_RE.search(line)
             if match:
+                # `DW_AT_comp_dir` is only needed for path recovery. Relative
+                # `DW_AT_name` values are not useful for scoping without it.
                 value = clean_dwarf_value(match.group("value"))
                 die_by_offset[current_offset]["cu_comp_dir"] = value
                 continue
             match = DWARF_LINKAGE_RE.search(line)
             if match:
+                # Prefer linkage names when present because they are usually the
+                # most stable cross-reference between inlined and concrete DIEs.
                 die_by_offset[current_offset]["linkage_name"] = clean_dwarf_value(
                     match.group("value")
                 )
                 continue
             match = DWARF_ABSTRACT_ORIGIN_RE.search(line)
             if match:
+                # `DW_AT_abstract_origin` ties an inlined subroutine back to the
+                # abstract DIE that owns the callee's canonical identity.
                 die_by_offset[current_offset]["abstract_origin"] = int(
                     match.group("offset"), 16
                 )
                 continue
             match = DWARF_SPECIFICATION_RE.search(line)
             if match:
+                # `DW_AT_specification` ties a concrete definition back to a
+                # declaration DIE that may carry the canonical source-level name.
                 die_by_offset[current_offset]["specification"] = int(
                     match.group("offset"), 16
                 )
@@ -504,6 +641,9 @@ def parse_dwarf_data(
             abstract_origin = die.get("abstract_origin")
             if not isinstance(abstract_origin, int):
                 continue
+            # Inlined subroutines do not name the callee directly in a way that
+            # is reliable across compilers; the abstract-origin chain is the
+            # stable way to recover "which function was inlined here?".
             callee = resolve_die_identity(abstract_origin, die_by_offset, normalize_clones)
             parent = die.get("parent")
             caller: Optional[Tuple[str, Optional[str]]] = None
@@ -529,6 +669,16 @@ def find_inline_only_functions(
 ) -> Set[Tuple[str, Optional[str]]]:
     # Infer extra removals for callees that only survive as inlined DWARF
     # entries and whose every caller is already known to be discarded.
+    #
+    # Args:
+    # - remove_functions: already-confirmed removed functions, including object
+    #   scope when known.
+    # - inline_info: inline callee -> callers map from `parse_dwarf_data()`.
+    # - defined_functions: functions that still have concrete code ranges in
+    #   DWARF and therefore should not be treated as inline-only.
+    #
+    # Returns:
+    # - additional scoped removals that are safe to infer from DWARF alone.
     extra: Set[Tuple[str, Optional[str]]] = set()
     for callee, callers in inline_info.items():
         if not callers or callee in remove_functions:
