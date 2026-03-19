@@ -21,11 +21,11 @@ This repo contains a minimal example project that:
   any `*.gcno` files under the build directory.
 - `gcovr` uses the updated `gcno` files to produce the coverage report.
 
-If the linker reports discarded code from an aggregate object such as
-`prelink.o` or `built_in.o`, `ld_gc_sections_to_funcs.py` scans leaf `*.o`
-files under the build tree and tries to map each removed name back to a
-single object. If that mapping is ambiguous, it prints a warning and falls
-back to a commented `# REVIEW ...` entry for human review unless
+If the linker reports discarded code from an intermediate object that does
+not have a matching `*.gcno` file, `ld_gc_sections_to_funcs.py` scans leaf
+`*.o` files under the build tree and tries to map each removed name back to
+a single object. If that mapping is ambiguous, it prints a warning and
+falls back to a commented `# REVIEW ...` entry for human review unless
 `--strict-object-match` is used.
 
 If the linker drops inline-only functions, `ld_gc_sections_to_funcs.py` can
