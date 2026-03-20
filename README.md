@@ -46,6 +46,36 @@ out-of-line body. In that case the linker log only reports the caller, so the
 inline-only callee remains in the `gcno` file unless `--dwarf` is used to
 discover the inlining relationship.
 
+### How the DWARF check works
+
+The DWARF logic uses two different kinds of entries:
+
+- `DW_TAG_subprogram` entries represent normal function DIEs. If a subprogram
+  has `DW_AT_low_pc` or `DW_AT_ranges`, the tool treats that as evidence that
+  the function still has concrete out-of-line machine code and should not be
+  auto-removed as inline-only.
+- `DW_TAG_inlined_subroutine` entries represent inline expansions inside a
+  caller. The tool follows `DW_AT_abstract_origin` from that entry back to the
+  abstract DIE that identifies the callee, then walks upward to the containing
+  `DW_TAG_subprogram` to identify the caller that contains the inline expansion.
+
+That lets the tool build:
+
+- a set of functions that still appear to have out-of-line code
+- a map of `inline callee -> callers that inline it`
+
+A function is treated as an inline-only removal candidate only when:
+
+- it appears through `DW_TAG_inlined_subroutine` expansions
+- it does not appear to have out-of-line code of its own
+- every observed caller that inlines it was already removed by the linker
+- the callee and callers can be mapped back to concrete leaf objects with
+  matching `*.gcno` files
+
+This is intentionally conservative. If the DWARF provenance is missing or
+ambiguous, the tool leaves the entry in review-only form instead of widening
+the removal scope automatically.
+
 ## gcno notes overview
 
 `*.gcno` files contain coverage notes emitted at compile time. They record
