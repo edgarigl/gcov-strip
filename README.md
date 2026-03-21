@@ -7,14 +7,14 @@ functions so coverage reports stay in sync with functions removed by
 This repo contains a minimal example project that:
 
 - builds a tiny C binary with coverage flags
-- uses the linker map to list discarded functions
+- uses linker `--print-gc-sections` output to list discarded functions
 - runs `gcov-strip` to remove their notes
 - generates an HTML coverage report with `gcovr`
 
 ## How it works
 
 - `ld_gc_sections_to_funcs.py` parses the linker output and writes
-  `funcs-removed.cfg` with functions removed by garbage collection.
+  `funcs-removed.cfg` with object-qualified removals from garbage collection.
   When possible it writes `object:function` entries so removals are scoped
   to the matching `*.gcno` file instead of applying globally by name.
 - `gcov-strip` reads that config and removes those function records from
@@ -149,7 +149,7 @@ contain commented review notes instead of an unsafe bare-name fallback:
 ```
 
 If a removed symbol only matches leaf objects without `*.gcno` files and there
-is no coverage-bearing DWARF subprogram provenance for it, the tool tags it
+is no non-assembler DWARF function provenance for it, the tool tags it
 separately as likely non-covered code, for example hand-written assembly.
 Assembler DWARF does not block this classification:
 
