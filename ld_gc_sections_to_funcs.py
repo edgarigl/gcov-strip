@@ -30,11 +30,33 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import DefaultDict, Dict, Iterable, List, NamedTuple, Optional, Set, Tuple
 
 FuncKey = Tuple[str, Optional[str]]
 SymbolIndex = DefaultDict[str, Set[str]]
-DieMap = Dict[int, Dict[str, object]]
+
+
+@dataclass
+# pylint: disable=too-many-instance-attributes
+class Die:
+    """One parsed DWARF DIE entry from `readelf --debug-dump=info`."""
+
+    tag: str
+    name: Optional[str] = None
+    linkage_name: Optional[str] = None
+    abstract_origin: Optional[int] = None
+    specification: Optional[int] = None
+    parent: Optional[int] = None
+    has_code: bool = False
+    cu_offset: Optional[int] = None
+    cu_name: Optional[str] = None
+    cu_comp_dir: Optional[str] = None
+    cu_language: Optional[str] = None
+    dwarf_object: Optional[str] = None
+
+
+DieMap = Dict[int, Die]
 
 
 class DwarfResolutionState(NamedTuple):
@@ -653,42 +675,36 @@ class DwarfScanner:
         if not die:
             return None
 
-        name = die.get("name") or die.get("linkage_name")
+        name = die.name or die.linkage_name
         if name:
-            return normalize_name(str(name), self.normalize_clones)
+            return normalize_name(name, self.normalize_clones)
 
-        spec = die.get("specification")
-        if isinstance(spec, int):
-            resolved = self.resolve_name(spec, visited)
+        if die.specification is not None:
+            resolved = self.resolve_name(die.specification, visited)
             if resolved:
                 return resolved
 
-        origin = die.get("abstract_origin")
-        if isinstance(origin, int):
-            return self.resolve_name(origin, visited)
+        if die.abstract_origin is not None:
+            return self.resolve_name(die.abstract_origin, visited)
         return None
 
-    def object_hint(self, die: Dict[str, object]) -> Optional[str]:
+    def object_hint(self, die: Die) -> Optional[str]:
         """
         Resolve the leaf object that should own the gcno for one DIE.
         """
-        direct_object = die.get("dwarf_object")
-        if isinstance(direct_object, str) and object_has_matching_gcno(direct_object):
-            return normalize_object_path(direct_object)
+        if die.dwarf_object and object_has_matching_gcno(die.dwarf_object):
+            return normalize_object_path(die.dwarf_object)
 
-        cu_offset = die.get("cu_offset")
-        if not isinstance(cu_offset, int):
+        if die.cu_offset is None:
             return None
-        cu_die = self.die_by_offset.get(cu_offset)
+        cu_die = self.die_by_offset.get(die.cu_offset)
         if not cu_die:
             return None
-        source_name = cu_die.get("cu_name")
-        if not isinstance(source_name, str):
+        if not cu_die.cu_name:
             return None
-        comp_dir = cu_die.get("cu_comp_dir")
         return object_from_source_path(
-            source_name,
-            comp_dir if isinstance(comp_dir, str) else None,
+            cu_die.cu_name,
+            cu_die.cu_comp_dir,
         )
 
     def resolve_identity(
@@ -709,19 +725,17 @@ class DwarfScanner:
         if not die:
             return None
 
-        name = die.get("name") or die.get("linkage_name")
+        name = die.name or die.linkage_name
         if name:
-            return normalize_name(str(name), self.normalize_clones), self.object_hint(die)
+            return normalize_name(name, self.normalize_clones), self.object_hint(die)
 
-        spec = die.get("specification")
-        if isinstance(spec, int):
-            resolved = self.resolve_identity(spec, visited)
+        if die.specification is not None:
+            resolved = self.resolve_identity(die.specification, visited)
             if resolved:
                 return resolved
 
-        origin = die.get("abstract_origin")
-        if isinstance(origin, int):
-            return self.resolve_identity(origin, visited)
+        if die.abstract_origin is not None:
+            return self.resolve_identity(die.abstract_origin, visited)
         return None
 
     def scan_one(self, path: str) -> Tuple[Dict[FuncKey, Set[FuncKey]], Set[FuncKey]]:
@@ -772,19 +786,12 @@ class DwarfScanner:
         if tag == "DW_TAG_compile_unit":
             current_cu_offset = offset
 
-        self.die_by_offset[offset] = {
-            "tag": tag,
-            "name": None,
-            "linkage_name": None,
-            "abstract_origin": None,
-            "specification": None,
-            "parent": parent,
-            "has_code": False,
-            "cu_offset": current_cu_offset,
-            "cu_name": None,
-            "cu_comp_dir": None,
-            "dwarf_object": dwarf_object_hint,
-        }
+        self.die_by_offset[offset] = Die(
+            tag=tag,
+            parent=parent,
+            cu_offset=current_cu_offset,
+            dwarf_object=dwarf_object_hint,
+        )
         stack.append(offset)
         return offset, current_cu_offset
 
@@ -800,11 +807,11 @@ class DwarfScanner:
     def collect_defined(
         self,
         offset: int,
-        die: Dict[str, object],
+        die: Die,
         defined: Set[FuncKey],
     ) -> None:
-        """Record one subprogram as defined when it still has code."""
-        if die.get("tag") != "DW_TAG_subprogram" or not die.get("has_code"):
+        """Record one function as defined when it still has code."""
+        if die.tag != "DW_TAG_subprogram" or not die.has_code:
             return
         identity = self.resolve_identity(offset)
         if identity:
@@ -814,11 +821,11 @@ class DwarfScanner:
 
     def collect_inline_callers(
         self,
-        die: Dict[str, object],
+        die: Die,
         inlined_callers: Dict[FuncKey, Set[FuncKey]],
     ) -> None:
         """Record one `inlined callee -> caller` relationship."""
-        if die.get("tag") != "DW_TAG_inlined_subroutine":
+        if die.tag != "DW_TAG_inlined_subroutine":
             return
         callee = self.resolve_inline_callee(die)
         caller = self.resolve_inlined_subroutine_caller(die)
@@ -829,71 +836,62 @@ class DwarfScanner:
         """
         Update one DIE from one readelf attribute line.
         """
+        die = self.die_by_offset[current_offset]
         if DWARF_LOW_PC_RE.search(line) or DWARF_RANGES_RE.search(line):
-            self.die_by_offset[current_offset]["has_code"] = True
+            die.has_code = True
             return
 
         match = DWARF_NAME_RE.search(line)
         if match:
             value = clean_dwarf_value(match.group("value"))
-            self.die_by_offset[current_offset]["name"] = value
+            die.name = value
 
-            if self.die_by_offset[current_offset].get("tag") == "DW_TAG_compile_unit":
-                self.die_by_offset[current_offset]["cu_name"] = value
-                self.die_by_offset[current_offset]["cu_offset"] = current_offset
+            if die.tag == "DW_TAG_compile_unit":
+                die.cu_name = value
+                die.cu_offset = current_offset
             return
 
         match = DWARF_COMP_DIR_RE.search(line)
         if match:
-            self.die_by_offset[current_offset]["cu_comp_dir"] = clean_dwarf_value(
-                match.group("value")
-            )
+            die.cu_comp_dir = clean_dwarf_value(match.group("value"))
             return
 
         match = DWARF_LANGUAGE_RE.search(line)
         if match:
-            language = clean_dwarf_value(match.group("value"))
-            self.die_by_offset[current_offset]["cu_language"] = language
+            die.cu_language = clean_dwarf_value(match.group("value"))
             return
 
         match = DWARF_LINKAGE_RE.search(line)
         if match:
-            self.die_by_offset[current_offset]["linkage_name"] = clean_dwarf_value(
-                match.group("value")
-            )
+            die.linkage_name = clean_dwarf_value(match.group("value"))
             return
 
         match = DWARF_ABSTRACT_ORIGIN_RE.search(line)
         if match:
-            self.die_by_offset[current_offset]["abstract_origin"] = int(
-                match.group("offset"), 16
-            )
+            die.abstract_origin = int(match.group("offset"), 16)
             return
 
         match = DWARF_SPECIFICATION_RE.search(line)
         if match:
-            self.die_by_offset[current_offset]["specification"] = int(
-                match.group("offset"), 16
-            )
+            die.specification = int(match.group("offset"), 16)
 
-    def resolve_inline_callee(self, die: Dict[str, object]) -> Optional[FuncKey]:
+    def resolve_inline_callee(self, die: Die) -> Optional[FuncKey]:
         """
         Resolve the callee identity for one `DW_TAG_inlined_subroutine` DIE.
         """
-        abstract_origin = die.get("abstract_origin")
-        if not isinstance(abstract_origin, int):
+        if die.abstract_origin is None:
             return None
-        return self.resolve_identity(abstract_origin)
+        return self.resolve_identity(die.abstract_origin)
 
     def resolve_inlined_subroutine_caller(
         self,
-        die: Dict[str, object],
+        die: Die,
     ) -> Optional[FuncKey]:
         """
         Follow parent DIEs until the enclosing caller function is found.
         """
-        parent = die.get("parent")
-        while isinstance(parent, int):
+        parent = die.parent
+        while parent is not None:
             parent_die = self.die_by_offset.get(parent)
             if not parent_die:
                 return None
@@ -902,27 +900,24 @@ class DwarfScanner:
             # try/catch regions, or other scope/container DIEs rather than
             # directly under the caller function DIE, so keep walking upward
             # until the first enclosing function is found.
-            if parent_die.get("tag") == "DW_TAG_subprogram":
+            if parent_die.tag == "DW_TAG_subprogram":
                 return self.resolve_identity(parent)
-            parent = parent_die.get("parent")
+            parent = parent_die.parent
         return None
 
-    def is_assembly_die(self, die: Dict[str, object]) -> bool:
+    def is_assembly_die(self, die: Die) -> bool:
         """Return true when one DIE belongs to an assembler compile unit."""
-        cu_offset = die.get("cu_offset")
-        if not isinstance(cu_offset, int):
+        if die.cu_offset is None:
             return False
 
-        cu_die = self.die_by_offset.get(cu_offset)
+        cu_die = self.die_by_offset.get(die.cu_offset)
         if not cu_die:
             return False
 
-        language = cu_die.get("cu_language")
-        if isinstance(language, str) and "assembler" in language.lower():
+        if cu_die.cu_language and "assembler" in cu_die.cu_language.lower():
             return True
 
-        source_name = cu_die.get("cu_name")
-        if isinstance(source_name, str) and source_name.endswith((".S", ".s")):
+        if cu_die.cu_name and cu_die.cu_name.endswith((".S", ".s")):
             return True
 
         return False
