@@ -176,8 +176,8 @@ def extract_functions(
 
 def normalize_object_path(path: str) -> str:
     """Normalize an object path into a stable key for gcno matching."""
-    # Normalize linker-reported object paths into stable relative keys when
-    # possible so they can be matched against gcno locations later.
+    # Normalize object paths so linker, DWARF, and filesystem paths compare as
+    # the same object.
     normalized = os.path.normpath(path)
     if os.path.isabs(normalized):
         try:
