@@ -305,7 +305,7 @@ def pick_leaf_object(
     surviving_symbols: SymbolIndex,
     removed_objects: Set[str],
 ) -> Tuple[Optional[str], List[str]]:
-    """Pick one leaf object using the strongest available provenance first."""
+    """Choose one removed leaf object and report the candidates considered."""
     if len(leaf_objects) == 1:
         return leaf_objects[0], leaf_objects
 
@@ -364,7 +364,7 @@ class RemovalResolver:
         name: str,
         obj_path: Optional[str],
     ) -> Tuple[List[str], List[str], List[str]]:
-        """Resolve one removed function into config lines, warnings, and reviews."""
+        """Turn one removed function into config lines, warnings, and reviews."""
         if obj_path and object_has_matching_gcno(obj_path):
             return [f"{obj_path}:{name}"], [], []
 
@@ -761,7 +761,7 @@ class DwarfScanner:
         return offset, current_cu_offset
 
     def collect_results(self) -> Tuple[Dict[FuncKey, Set[FuncKey]], Set[FuncKey]]:
-        """Collect inline relationships and still-defined functions."""
+        """Summarize the parsed DIE table as inline edges plus defined functions."""
         inlined_callers: Dict[FuncKey, Set[FuncKey]] = defaultdict(set)
         defined: Set[FuncKey] = set()
         for offset, die in self.die_by_offset.items():
@@ -793,7 +793,7 @@ class DwarfScanner:
         if die.get("tag") != "DW_TAG_inlined_subroutine":
             return
         callee = self.resolve_inline_callee(die)
-        caller = self.resolve_inline_caller(die)
+        caller = self.resolve_inlined_subroutine_caller(die)
         if callee and caller:
             inlined_callers[callee].add(caller)
 
@@ -857,15 +857,23 @@ class DwarfScanner:
             return None
         return self.resolve_identity(abstract_origin)
 
-    def resolve_inline_caller(self, die: Dict[str, object]) -> Optional[FuncKey]:
+    def resolve_inlined_subroutine_caller(
+        self,
+        die: Dict[str, object],
+    ) -> Optional[FuncKey]:
         """
-        Walk parent DIEs upward until the containing subprogram is found.
+        Follow parent DIEs until the enclosing caller function is found.
         """
         parent = die.get("parent")
         while isinstance(parent, int):
             parent_die = self.die_by_offset.get(parent)
             if not parent_die:
                 return None
+
+            # An inlined-subroutine DIE is often nested inside lexical blocks,
+            # try/catch regions, or other scope/container DIEs rather than
+            # directly under the caller function DIE, so keep walking upward
+            # until the first enclosing function is found.
             if parent_die.get("tag") == "DW_TAG_subprogram":
                 return self.resolve_identity(parent)
             parent = parent_die.get("parent")
@@ -899,6 +907,13 @@ def parse_dwarf_data(
     """
     Scan DWARF inputs and collect inline-callee relationships plus subprograms
     that still appear to own concrete code ranges.
+
+    Returns four pieces of state:
+    - `inline callee -> callers`
+    - all functions that still look defined out-of-line
+    - functions defined in non-`.o` DWARF inputs, used as the final-ELF
+      "surviving function" view during object resolution
+    - function names whose DWARF provenance comes from assembler compile units
     """
     scanner = DwarfScanner(normalize_clones)
     inlined_callers: Dict[FuncKey, Set[FuncKey]] = defaultdict(set)
@@ -996,13 +1011,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_inline_only(
+def resolve_inline_only_removals(
     args: argparse.Namespace,
     functions: List[str],
     inlined: Dict[FuncKey, Set[FuncKey]],
     defined: Set[FuncKey],
 ) -> Tuple[List[str], List[str], List[str]]:
-    """Resolve extra inline-only removals from DWARF input."""
+    """Infer inline-only removals from DWARF and scope them to safe config lines."""
+    # Start from the already-resolved linker removals, then ask DWARF for
+    # extra callees that only survive as inline expansions. Any such callee
+    # still has to go through the normal object-resolution path before it
+    # becomes an active `object:function` config entry.
     if not inlined and not defined:
         return [], [], []
 
@@ -1075,7 +1094,7 @@ def main() -> int:
         for warning in warnings:
             print(f"warning: {warning}", file=sys.stderr)
 
-        inline_only, inline_warnings, inline_review_lines = resolve_inline_only(
+        inline_only, inline_warnings, inline_review_lines = resolve_inline_only_removals(
             args, functions, inlined, defined
         )
         for warning in inline_warnings:
