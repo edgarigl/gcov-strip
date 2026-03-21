@@ -334,8 +334,8 @@ def print_removed_lines(
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
     """Parse command-line arguments."""
-    # Keep the CLI narrow: config files define removals, and flags only control
-    # reporting versus in-place rewriting.
+    # Keep the CLI narrow: object-qualified config files define removals, and
+    # flags only control reporting versus in-place rewriting.
     parser = argparse.ArgumentParser(
         description=(
             "Remove selected function records from .gcno files found "
@@ -347,7 +347,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         "--config",
         action="append",
         required=True,
-        help="Path to a text file listing function names to remove."
+        help="Path to a text file listing object:function removals."
         " Can be provided multiple times.",
     )
     parser.add_argument(
