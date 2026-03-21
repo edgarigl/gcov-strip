@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Convert linker `--print-gc-sections` output into removals for gcov-strip."""
 # pylint: disable=too-many-lines
 #
