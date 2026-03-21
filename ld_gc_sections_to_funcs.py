@@ -44,18 +44,18 @@ SymbolIndex = DefaultDict[str, Set[str]]
 class Die:
     """One parsed DWARF DIE entry from `readelf --debug-dump=info`."""
 
-    tag: str
-    name: Optional[str] = None
-    linkage_name: Optional[str] = None
-    abstract_origin: Optional[int] = None
-    specification: Optional[int] = None
-    parent: Optional[int] = None
-    has_code: bool = False
-    cu_offset: Optional[int] = None
-    cu_name: Optional[str] = None
-    cu_comp_dir: Optional[str] = None
-    cu_language: Optional[str] = None
-    dwarf_object: Optional[str] = None
+    tag: str                            # DIE tag, e.g. inlined_subroutine
+    name: Optional[str] = None          # DW_AT_name source-level name
+    linkage_name: Optional[str] = None  # linker-visible symbol name
+    origin: Optional[int] = None        # referenced inline/cloned origin
+    declaration: Optional[int] = None   # referenced declaration DIE
+    parent: Optional[int] = None        # parent DIE offset in this CU
+    has_code: bool = False              # has low_pc or ranges
+    cu_offset: Optional[int] = None     # owning compile-unit offset
+    cu_name: Optional[str] = None       # compile-unit source path
+    cu_comp_dir: Optional[str] = None   # compile-unit working dir
+    cu_language: Optional[str] = None   # compile-unit language string
+    dwarf_object: Optional[str] = None  # scanned leaf-object path
 
 
 DieMap = Dict[int, Die]
@@ -708,13 +708,13 @@ class DwarfScanner:
         if name:
             return normalize_name(name, self.normalize_clones), self.object_hint(die)
 
-        if die.specification is not None:
-            resolved = self.resolve_identity(die.specification, visited)
+        if die.declaration is not None:
+            resolved = self.resolve_identity(die.declaration, visited)
             if resolved:
                 return resolved
 
-        if die.abstract_origin is not None:
-            return self.resolve_identity(die.abstract_origin, visited)
+        if die.origin is not None:
+            return self.resolve_identity(die.origin, visited)
         return None
 
     def scan_one(self, path: str) -> Tuple[Dict[FuncKey, Set[FuncKey]], Set[FuncKey]]:
@@ -847,20 +847,20 @@ class DwarfScanner:
 
         match = DWARF_ABSTRACT_ORIGIN_RE.search(line)
         if match:
-            die.abstract_origin = int(match.group("offset"), 16)
+            die.origin = int(match.group("offset"), 16)
             return
 
         match = DWARF_SPECIFICATION_RE.search(line)
         if match:
-            die.specification = int(match.group("offset"), 16)
+            die.declaration = int(match.group("offset"), 16)
 
     def resolve_inline_callee(self, die: Die) -> Optional[FuncKey]:
         """
         Resolve the callee identity for one `DW_TAG_inlined_subroutine` DIE.
         """
-        if die.abstract_origin is None:
+        if die.origin is None:
             return None
-        return self.resolve_identity(die.abstract_origin)
+        return self.resolve_identity(die.origin)
 
     def resolve_inlined_subroutine_caller(
         self,
