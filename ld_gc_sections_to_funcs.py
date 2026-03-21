@@ -415,6 +415,15 @@ class RemovalResolver:
         }
         self.assembly_defined_names = dwarf_state.assembly_defined_names
 
+    def format_review_block(
+        self,
+        heading: str,
+        detail_lines: List[str],
+        name: str,
+    ) -> List[str]:
+        """Build one commented review/info block with a trailing blank line."""
+        return [heading, *detail_lines, f"# {name}", ""]
+
     def resolve_one(
         self,
         name: str,
@@ -454,13 +463,12 @@ class RemovalResolver:
         ]
         if self.strict:
             return [], warnings, []
-        review_lines = [
+        review_lines = self.format_review_block(
             "# REVIEW ambiguous removal for "
             f"{name} from {obj_path or '<unknown object>'}",
-            f"# candidates: {joined}",
-            f"# {name}",
-            "",
-        ]
+            [f"# candidates: {joined}"],
+            name,
+        )
         return [], warnings, review_lines
 
     def unresolved_result(
@@ -485,13 +493,12 @@ class RemovalResolver:
         ]
         if self.strict:
             return [], warnings, []
-        review_lines = [
+        review_lines = self.format_review_block(
             "# REVIEW unresolved removal for "
             f"{name} from {obj_path or '<unknown object>'}",
-            "# candidates: none",
-            f"# {name}",
-            "",
-        ]
+            ["# candidates: none"],
+            name,
+        )
         return [], warnings, review_lines
 
     def uncovered_result(
@@ -508,14 +515,15 @@ class RemovalResolver:
         ]
         if self.strict:
             return [], warnings, []
-        review_lines = [
+        review_lines = self.format_review_block(
             "# INFO likely assembly/no-coverage removal for "
             f"{name} from {obj_path or '<unknown object>'}",
-            "# reason: no gcno coverage",
-            f"# candidates: {joined}",
-            f"# {name}",
-            "",
-        ]
+            [
+                "# reason: no gcno coverage",
+                f"# candidates: {joined}",
+            ],
+            name,
+        )
         return [], warnings, review_lines
 
 
