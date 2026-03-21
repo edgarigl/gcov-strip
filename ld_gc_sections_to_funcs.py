@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Convert linker `--print-gc-sections` output into removals for gcov-strip."""
+# pylint: disable=too-many-lines
 #
 # Convert linker `--print-gc-sections` output into a list of function names
 # whose coverage notes should be removed from `.gcno` files.
@@ -174,6 +175,11 @@ def object_has_matching_gcno(path: str) -> bool:
     return any(os.path.exists(candidate) for candidate in object_gcno_candidates(path))
 
 
+def is_object_path(path: str) -> bool:
+    """Return true when one DWARF input path is a leaf object file."""
+    return path.endswith(".o")
+
+
 def object_from_source_path(source_name: str, comp_dir: Optional[str]) -> Optional[str]:
     """Map a DWARF compile-unit source path back to a likely leaf object."""
     # DWARF compile units identify source files, not object files. In normal C
@@ -268,16 +274,163 @@ def build_object_symbol_index(
     return by_name
 
 
+def build_removed_object_set(removed_entries: List[FuncKey]) -> Set[str]:
+    """Return leaf objects that already appear in linker removals."""
+    removed_objects: Set[str] = set()
+    for _, obj_path in removed_entries:
+        if obj_path and object_has_matching_gcno(obj_path):
+            removed_objects.add(obj_path)
+    return removed_objects
+
+
+def build_surviving_symbol_index(defined_functions: Set[FuncKey]) -> SymbolIndex:
+    """Index final-DWARF `function -> surviving objects` relationships."""
+    surviving: SymbolIndex = defaultdict(set)
+    for name, obj_path in defined_functions:
+        if obj_path:
+            surviving[name].add(obj_path)
+    return surviving
+
+
+def pick_leaf_object(
+    name: str,
+    leaf_objects: List[str],
+    surviving_symbols: SymbolIndex,
+    removed_objects: Set[str],
+) -> Tuple[Optional[str], List[str]]:
+    """Pick one leaf object using the strongest available provenance first."""
+    if len(leaf_objects) == 1:
+        return leaf_objects[0], leaf_objects
+
+    # If final-ELF DWARF says which same-name leaf object survived, prefer the
+    # remaining candidate. This is stronger than a name scan because it comes
+    # from the actual linked image instead of just "who defines this name".
+    surviving_objects = sorted(
+        path for path in leaf_objects if path in surviving_symbols.get(name, set())
+    )
+    removed_candidates = [
+        path for path in leaf_objects if path not in set(surviving_objects)
+    ]
+    if surviving_objects and len(removed_candidates) == 1:
+        return removed_candidates[0], removed_candidates
+
+    touched_objects = [path for path in leaf_objects if path in removed_objects]
+    if len(touched_objects) == 1:
+        return touched_objects[0], touched_objects
+
+    return None, touched_objects or leaf_objects
+
+
+class RemovalResolver:
+    """Resolve removed functions into object-qualified config lines."""
+
+    def __init__(
+        self,
+        removed_entries: List[FuncKey],
+        normalize_clones: bool,
+        strict: bool,
+        defined_functions: Optional[Set[FuncKey]] = None,
+    ):
+        """Build the indexes needed to scope removals to leaf objects."""
+        self.strict = strict
+        self.symbol_index = build_object_symbol_index(
+            os.getcwd(),
+            {name for name, _ in removed_entries},
+            normalize_clones,
+        )
+        self.removed_objects = build_removed_object_set(removed_entries)
+        self.surviving_symbols = build_surviving_symbol_index(
+            defined_functions or set()
+        )
+
+    def resolve_one(
+        self,
+        name: str,
+        obj_path: Optional[str],
+    ) -> Tuple[List[str], List[str], List[str]]:
+        """Resolve one removed function into config lines, warnings, and reviews."""
+        if obj_path and object_has_matching_gcno(obj_path):
+            return [f"{obj_path}:{name}"], [], []
+
+        leaf_objects = sorted(self.symbol_index.get(name, set()))
+        chosen_object, candidate_objects = pick_leaf_object(
+            name,
+            leaf_objects,
+            self.surviving_symbols,
+            self.removed_objects,
+        )
+
+        if chosen_object is not None:
+            return [f"{chosen_object}:{name}"], [], []
+
+        if candidate_objects:
+            return self.ambiguous_result(name, obj_path, candidate_objects)
+
+        return self.unresolved_result(name, obj_path)
+
+    def ambiguous_result(
+        self,
+        name: str,
+        obj_path: Optional[str],
+        candidate_objects: List[str],
+    ) -> Tuple[List[str], List[str], List[str]]:
+        """Return warnings and optional review lines for one ambiguous removal."""
+        joined = ", ".join(candidate_objects)
+        warnings = [
+            f"Ambiguous removal for {name}: {obj_path or '<unknown object>'} "
+            f"matches multiple leaf objects ({joined})"
+        ]
+        if self.strict:
+            return [], warnings, []
+        review_lines = [
+            "# REVIEW ambiguous removal for "
+            f"{name} from {obj_path or '<unknown object>'}",
+            f"# candidates: {joined}",
+            f"# {name}",
+        ]
+        return [], warnings, review_lines
+
+    def unresolved_result(
+        self,
+        name: str,
+        obj_path: Optional[str],
+    ) -> Tuple[List[str], List[str], List[str]]:
+        """Return warnings and optional review lines for one unresolved removal."""
+        warnings = [
+            f"Could not resolve {name} from {obj_path or '<unknown object>'} "
+            "to a leaf object"
+        ]
+        if self.strict:
+            return [], warnings, []
+        review_lines = [
+            "# REVIEW unresolved removal for "
+            f"{name} from {obj_path or '<unknown object>'}",
+            "# candidates: none",
+            f"# {name}",
+        ]
+        return [], warnings, review_lines
+
+
 def resolve_removed_entries(
     removed_entries: List[FuncKey],
     normalize_clones: bool,
     strict: bool,
+    defined_functions: Optional[Set[FuncKey]] = None,
 ) -> Tuple[List[str], List[str], List[str]]:
     """Turn removed entries into active config lines and review notes."""
-    # Resolve linker removals into config lines. Direct leaf objects become
-    # `object:function`; aggregate objects are mapped back to leaf objects via a
-    # symbol index. Ambiguous or unresolved entries are emitted as commented
-    # review notes unless strict mode is enabled.
+    # Resolve linker removals into config lines.
+    #
+    # Resolution order:
+    # 1. If the linker-reported object has its own gcno, emit it directly as
+    #    `object:function`.
+    # 2. Otherwise, if final-ELF DWARF identifies which same-name leaf object
+    #    survived, choose the remaining candidate object as the removed one.
+    # 3. Otherwise find leaf objects that define the same function name.
+    # 4. If exactly one leaf object matches, use it.
+    # 5. If several leaf objects match, prefer the one leaf object that also
+    #    appears somewhere in the linker removal set.
+    # 6. If resolution is still not unique, emit a `# REVIEW ...` block or fail
+    #    in strict mode.
     #
     # Args:
     # - removed_entries: linker- or DWARF-derived `(function, object_hint)`
@@ -287,13 +440,20 @@ def resolve_removed_entries(
     #   building the leaf-object symbol index.
     # - strict: if true, unresolved or ambiguous mappings raise an error instead
     #   of being emitted as commented review entries.
+    # - defined_functions: `DW_TAG_subprogram` identities that still appear to
+    #   own code in non-`.o` DWARF inputs, used to identify which same-name leaf
+    #   object survived in the final linked image.
     #
     # Returns:
     # - active config lines safe for `gcov-strip`
     # - warning messages describing ambiguous or unresolved cases
     # - commented review lines to append to the generated config
-    interesting_names = {name for name, _ in removed_entries}
-    symbol_index = build_object_symbol_index(os.getcwd(), interesting_names, normalize_clones)
+    resolver = RemovalResolver(
+        removed_entries,
+        normalize_clones,
+        strict,
+        defined_functions,
+    )
 
     resolved_lines: List[str] = []
     warnings: List[str] = []
@@ -301,56 +461,12 @@ def resolve_removed_entries(
     seen_lines: Set[str] = set()
 
     for name, obj_path in removed_entries:
-        candidate_lines: List[str] = []
-
-        if obj_path and object_has_matching_gcno(obj_path):
-            # Leaf objects already line up with a single gcno file, so they can
-            # be emitted directly as scoped `object:function` removals.
-            candidate_lines = [f"{obj_path}:{name}"]
-        else:
-            leaf_objects = sorted(symbol_index.get(name, set()))
-            if len(leaf_objects) == 1:
-                # Intermediate link steps may report a combined object rather
-                # than the leaf object that owns the gcno, so remap the name
-                # back to its sole leaf object.
-                candidate_lines = [f"{leaf_objects[0]}:{name}"]
-            elif len(leaf_objects) > 1:
-                joined = ", ".join(leaf_objects)
-                warnings.append(
-                    f"Ambiguous removal for {name}: {obj_path or '<unknown object>'} "
-                    f"matches multiple leaf objects ({joined})"
-                )
-                if strict:
-                    continue
-                # Leave ambiguous removals commented out by default so the
-                # generated config is safe to consume without stripping coverage
-                # from every gcno that happens to share the same function name.
-                review_lines.extend(
-                    [
-                        "# REVIEW ambiguous removal for "
-                        f"{name} from {obj_path or '<unknown object>'}",
-                        f"# candidates: {joined}",
-                        f"# {name}",
-                    ]
-                )
-            else:
-                warnings.append(
-                    f"Could not resolve {name} from {obj_path or '<unknown object>'} "
-                    "to a leaf object"
-                )
-                if strict:
-                    continue
-                # Keep unresolved names out of the active config for the same
-                # reason as ambiguous ones: a bare-name fallback would widen the
-                # removal scope beyond what the linker actually proved.
-                review_lines.extend(
-                    [
-                        "# REVIEW unresolved removal for "
-                        f"{name} from {obj_path or '<unknown object>'}",
-                        "# candidates: none",
-                        f"# {name}",
-                    ]
-                )
+        candidate_lines, entry_warnings, entry_review_lines = resolver.resolve_one(
+            name,
+            obj_path,
+        )
+        warnings.extend(entry_warnings)
+        review_lines.extend(entry_review_lines)
 
         for line in candidate_lines:
             if line not in seen_lines:
@@ -696,7 +812,7 @@ class DwarfScanner:
 def parse_dwarf_data(
     paths: Iterable[str],
     normalize_clones: bool,
-) -> Tuple[Dict[FuncKey, Set[FuncKey]], Set[FuncKey]]:
+) -> Tuple[Dict[FuncKey, Set[FuncKey]], Set[FuncKey], Set[FuncKey]]:
     """
     Scan DWARF inputs and collect inline-callee relationships plus subprograms
     that still appear to own concrete code ranges.
@@ -704,13 +820,16 @@ def parse_dwarf_data(
     scanner = DwarfScanner(normalize_clones)
     inlined_callers: Dict[FuncKey, Set[FuncKey]] = defaultdict(set)
     defined: Set[FuncKey] = set()
+    final_defined: Set[FuncKey] = set()
     for path in paths:
         file_inlined, file_defined = scanner.scan_one(path)
         defined.update(file_defined)
+        if not is_object_path(path):
+            final_defined.update(file_defined)
 
         for callee, callers in file_inlined.items():
             inlined_callers[callee].update(callers)
-    return inlined_callers, defined
+    return inlined_callers, defined, final_defined
 
 
 def find_inline_only_functions(
@@ -797,13 +916,14 @@ def parse_args() -> argparse.Namespace:
 def resolve_inline_only(
     args: argparse.Namespace,
     functions: List[str],
+    inlined: Dict[FuncKey, Set[FuncKey]],
+    defined: Set[FuncKey],
 ) -> Tuple[List[str], List[str], List[str]]:
     """Resolve extra inline-only removals from DWARF input."""
-    if not args.dwarf:
+    if not inlined and not defined:
         return [], [], []
 
     resolved_removals = {parse_scoped_entry(line) for line in functions}
-    inlined, defined = parse_dwarf_data(args.dwarf, args.normalize_clones)
     inline_only_entries = sorted(
         find_inline_only_functions(resolved_removals, inlined, defined)
     )
@@ -852,15 +972,27 @@ def main() -> int:
     args = parse_args()
 
     try:
+        inlined: Dict[FuncKey, Set[FuncKey]] = {}
+        defined: Set[FuncKey] = set()
+        final_defined: Set[FuncKey] = set()
+        if args.dwarf:
+            inlined, defined, final_defined = parse_dwarf_data(
+                args.dwarf,
+                args.normalize_clones,
+            )
+
         removed_entries = extract_functions(sys.stdin, args.normalize_clones, not args.quiet)
         functions, warnings, review_lines = resolve_removed_entries(
-            removed_entries, args.normalize_clones, args.strict_object_match
+            removed_entries,
+            args.normalize_clones,
+            args.strict_object_match,
+            final_defined,
         )
         for warning in warnings:
             print(f"warning: {warning}", file=sys.stderr)
 
         inline_only, inline_warnings, inline_review_lines = resolve_inline_only(
-            args, functions
+            args, functions, inlined, defined
         )
         for warning in inline_warnings:
             print(f"warning: {warning}", file=sys.stderr)

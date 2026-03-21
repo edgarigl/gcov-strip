@@ -28,6 +28,21 @@ a single object. If that mapping is ambiguous, it prints a warning and
 falls back to a commented `# REVIEW ...` entry for human review unless
 `--strict-object-match` is used.
 
+The object resolution order is:
+
+1. If the linker-reported object has its own matching `*.gcno`, use it
+   directly.
+2. Otherwise, if final-ELF DWARF uniquely shows which same-name leaf object
+   survived in the linked image, choose the remaining candidate object as the
+   removed one.
+3. Otherwise scan leaf `*.o` files and find those that define the same
+   function name.
+4. If exactly one leaf object matches, use it.
+5. If several leaf objects match, prefer the one leaf object that also
+   appears somewhere in the linker removal set.
+6. If resolution is still not unique, emit a commented `# REVIEW ...` entry,
+   or fail with `--strict-object-match`.
+
 If the linker drops inline-only functions, `ld_gc_sections_to_funcs.py` can
 scan DWARF info to detect them using `--dwarf`:
 
@@ -76,6 +91,12 @@ This is intentionally conservative. If the DWARF provenance is missing or
 ambiguous, the tool leaves the entry in review-only form instead of widening
 the removal scope automatically.
 
+The same compile-unit provenance can also help resolve ambiguous linker
+removals. If two leaf objects both define `merge`, but DWARF in the final ELF
+shows that the surviving `merge` belongs to only one compile unit, the tool can
+scope the removal to the other candidate object without falling back to a
+review-only entry.
+
 ## gcno notes overview
 
 `*.gcno` files contain coverage notes emitted at compile time. They record
@@ -108,20 +129,14 @@ Strip functions listed in `funcs-removed.cfg` and print removed lines:
 Use multiple `-c` options to combine several config files, and `--dry-run`
 to report removals without modifying `*.gcno` files.
 
-Use `--require-object-match` to ignore legacy bare-name entries and only
-apply object-qualified removals to the corresponding `*.gcno` file.
-
 ## Object-qualified config format
 
-Generated configs may contain either of these line formats:
+Generated configs use object-qualified removals:
 
 ```
-foo
 common/bar.o:foo
 ```
 
-- `foo` is the legacy global form and removes `foo` from any matching
-  `*.gcno` file. `gcov-strip` still accepts it for backward compatibility.
 - `common/bar.o:foo` removes `foo` only while rewriting `common/bar.gcno`.
 
 When object resolution is ambiguous or impossible, generated configs now
@@ -133,13 +148,11 @@ contain commented review notes instead of an unsafe bare-name fallback:
 # merge
 ```
 
-## Strict modes
+## Strict mode
 
 - `ld_gc_sections_to_funcs.py --strict-object-match` fails instead of falling
   back to a commented review entry when a removed symbol cannot be mapped to a
   single leaf object.
-- `gcov-strip --require-object-match` ignores legacy bare-name config entries
-  and only applies object-qualified entries to matching `*.gcno` files.
 
 ## Notes
 
