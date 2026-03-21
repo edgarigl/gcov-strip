@@ -657,37 +657,6 @@ class DwarfScanner:
         self.die_by_offset: DieMap = {}
         self.assembly_defined_names: Set[str] = set()
 
-    def resolve_name(
-        self,
-        offset: int,
-        visited: Optional[Set[int]] = None,
-    ) -> Optional[str]:
-        """
-        Resolve the best symbol name for one DIE.
-        """
-        if visited is None:
-            visited = set()
-        if offset in visited:
-            return None
-        visited.add(offset)
-
-        die = self.die_by_offset.get(offset)
-        if not die:
-            return None
-
-        name = die.name or die.linkage_name
-        if name:
-            return normalize_name(name, self.normalize_clones)
-
-        if die.specification is not None:
-            resolved = self.resolve_name(die.specification, visited)
-            if resolved:
-                return resolved
-
-        if die.abstract_origin is not None:
-            return self.resolve_name(die.abstract_origin, visited)
-        return None
-
     def object_hint(self, die: Die) -> Optional[str]:
         """
         Resolve the leaf object that should own the gcno for one DIE.
