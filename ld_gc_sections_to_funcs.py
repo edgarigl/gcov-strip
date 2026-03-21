@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Convert linker `--print-gc-sections` output into removals for gcov-strip."""
 #
 # Convert linker `--print-gc-sections` output into a list of function names
 # whose coverage notes should be removed from `.gcno` files.
@@ -28,6 +29,10 @@ import subprocess
 import sys
 from collections import defaultdict
 from typing import DefaultDict, Dict, Iterable, List, Optional, Set, Tuple
+
+FuncKey = Tuple[str, Optional[str]]
+SymbolIndex = DefaultDict[str, Set[str]]
+DieMap = Dict[int, Dict[str, object]]
 
 
 REMOVAL_RE = re.compile(
@@ -82,7 +87,8 @@ def extract_functions(
     lines: Iterable[str],
     normalize_clones: bool,
     echo_stderr: bool,
-) -> List[Tuple[str, Optional[str]]]:
+) -> List[FuncKey]:
+    """Extract unique `(function, object)` removals from linker output."""
     # Pull unique `(function, object)` pairs from linker diagnostics such as:
     #   removing unused section '.text.foo' in file 'foo.o'
     #
@@ -94,18 +100,21 @@ def extract_functions(
     #
     # Returns:
     # - a stable-order list of unique `(function_name, object_path)` tuples.
-    functions: List[Tuple[str, Optional[str]]] = []
-    seen: Set[Tuple[str, Optional[str]]] = set()
+    functions: List[FuncKey] = []
+    seen: Set[FuncKey] = set()
     for line in lines:
         if echo_stderr:
             sys.stderr.write(line)
+
         match = REMOVAL_RE.search(line)
         if not match:
             continue
+
         section, obj_path = match.groups()
         text_index = section.rfind(".text.")
         if text_index == -1:
             continue
+
         name = section[text_index + len(".text.") :]
         if normalize_clones:
             # GCC may emit clone-specific suffixes that should map back to the
@@ -121,6 +130,7 @@ def extract_functions(
 
 
 def normalize_object_path(path: str) -> str:
+    """Normalize an object path into a stable key for gcno matching."""
     # Normalize linker-reported object paths into stable relative keys when
     # possible so they can be matched against gcno locations later.
     normalized = os.path.normpath(path)
@@ -133,6 +143,7 @@ def normalize_object_path(path: str) -> str:
 
 
 def object_gcno_candidates(path: str) -> Set[str]:
+    """Return gcno path candidates for one object path."""
     # Linker diagnostics may report object paths in a few different forms. Try
     # the same path spellings when looking for the gcno file that would be
     # rewritten for an object-qualified removal.
@@ -155,6 +166,7 @@ def object_gcno_candidates(path: str) -> Set[str]:
 
 
 def object_has_matching_gcno(path: str) -> bool:
+    """Return true when an object path appears to own a gcno file."""
     # Treat an object as directly scopeable only when it has a corresponding
     # gcno file. Intermediate link artifacts often do not, which means they
     # need to be resolved back to leaf objects before we can safely scope a
@@ -163,6 +175,7 @@ def object_has_matching_gcno(path: str) -> bool:
 
 
 def object_from_source_path(source_name: str, comp_dir: Optional[str]) -> Optional[str]:
+    """Map a DWARF compile-unit source path back to a likely leaf object."""
     # DWARF compile units identify source files, not object files. In normal C
     # builds the object and gcno live next to the source path inside the build
     # tree, so try the obvious `.c -> .o` style translations and keep the first
@@ -196,6 +209,7 @@ def object_from_source_path(source_name: str, comp_dir: Optional[str]) -> Option
 
 
 def iter_object_files(root: str) -> Iterable[str]:
+    """Yield object files found under `root`."""
     for base, _, files in os.walk(root):
         for filename in files:
             if filename.endswith(".o"):
@@ -206,7 +220,8 @@ def build_object_symbol_index(
     root: str,
     interesting_names: Set[str],
     normalize_clones: bool,
-) -> DefaultDict[str, Set[str]]:
+) -> SymbolIndex:
+    """Build `function -> leaf objects` for names relevant to this run."""
     # Index leaf object definitions for the names we care about so aggregate
     # linker removals like `prelink.o:foo` can be mapped back to `bar.o:foo`.
     #
@@ -220,7 +235,7 @@ def build_object_symbol_index(
     # Returns:
     # - `function_name -> {object_path, ...}` for leaf objects that appear to
     #   define the function and also have a matching gcno file.
-    by_name: DefaultDict[str, Set[str]] = defaultdict(set)
+    by_name: SymbolIndex = defaultdict(set)
     for obj_path in iter_object_files(root):
         rel_path = normalize_object_path(obj_path)
         if not object_has_matching_gcno(rel_path):
@@ -239,22 +254,26 @@ def build_object_symbol_index(
             match = NM_LINE_RE.match(line.strip())
             if not match:
                 continue
+
             symbol_type = match.group("type")
             if symbol_type not in {"T", "t", "W", "w"}:
                 continue
+
             name = normalize_name(match.group("name"), normalize_clones)
             if name not in interesting_names or name in seen_in_object:
                 continue
+
             by_name[name].add(rel_path)
             seen_in_object.add(name)
     return by_name
 
 
 def resolve_removed_entries(
-    removed_entries: List[Tuple[str, Optional[str]]],
+    removed_entries: List[FuncKey],
     normalize_clones: bool,
     strict: bool,
 ) -> Tuple[List[str], List[str], List[str]]:
+    """Turn removed entries into active config lines and review notes."""
     # Resolve linker removals into config lines. Direct leaf objects become
     # `object:function`; aggregate objects are mapped back to leaf objects via a
     # symbol index. Ambiguous or unresolved entries are emitted as commented
@@ -283,6 +302,7 @@ def resolve_removed_entries(
 
     for name, obj_path in removed_entries:
         candidate_lines: List[str] = []
+
         if obj_path and object_has_matching_gcno(obj_path):
             # Leaf objects already line up with a single gcno file, so they can
             # be emitted directly as scoped `object:function` removals.
@@ -307,7 +327,8 @@ def resolve_removed_entries(
                 # from every gcno that happens to share the same function name.
                 review_lines.extend(
                     [
-                        f"# REVIEW ambiguous removal for {name} from {obj_path or '<unknown object>'}",
+                        "# REVIEW ambiguous removal for "
+                        f"{name} from {obj_path or '<unknown object>'}",
                         f"# candidates: {joined}",
                         f"# {name}",
                     ]
@@ -324,11 +345,13 @@ def resolve_removed_entries(
                 # removal scope beyond what the linker actually proved.
                 review_lines.extend(
                     [
-                        f"# REVIEW unresolved removal for {name} from {obj_path or '<unknown object>'}",
+                        "# REVIEW unresolved removal for "
+                        f"{name} from {obj_path or '<unknown object>'}",
                         "# candidates: none",
                         f"# {name}",
                     ]
                 )
+
         for line in candidate_lines:
             if line not in seen_lines:
                 seen_lines.add(line)
@@ -342,6 +365,7 @@ def resolve_removed_entries(
 
 
 def normalize_name(name: str, normalize_clones: bool) -> str:
+    """Normalize a name so linker, DWARF, and gcov forms line up."""
     # Normalize names from DWARF/readelf output so they can be compared against
     # linker-derived names and gcov function records.
     name = name.rstrip(".,")
@@ -354,6 +378,7 @@ def normalize_name(name: str, normalize_clones: bool) -> str:
 
 
 def parse_scoped_entry(line: str) -> Tuple[str, Optional[str]]:
+    """Parse one config line into `(function, object_hint)`."""
     # Config lines are either `function` or `object:function`. Keep the same
     # parser locally so linker-derived and DWARF-derived removals can share the
     # same scoped identity format.
@@ -366,24 +391,30 @@ def parse_scoped_entry(line: str) -> Tuple[str, Optional[str]]:
 
 
 def iter_readelf(args: List[str]) -> Iterable[str]:
+    """Stream `readelf` output line by line."""
     # Stream readelf output line-by-line so large DWARF dumps do not need to be
     # buffered in memory at once.
     try:
-        proc = subprocess.Popen(
-            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace"
-        )
+        with subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+        ) as proc:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                yield line.rstrip("\n")
+            stderr = proc.stderr.read() if proc.stderr else ""
+            returncode = proc.wait()
     except FileNotFoundError as exc:
         raise RuntimeError("readelf not found") from exc
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        yield line.rstrip("\n")
-    stderr = proc.stderr.read() if proc.stderr else ""
-    returncode = proc.wait()
     if returncode != 0:
         raise RuntimeError(f"readelf failed: {' '.join(args)}\n{stderr}")
 
 
 def clean_dwarf_value(value: str) -> str:
+    """Strip readelf formatting wrappers from one attribute value."""
     # readelf often prefixes attribute values with formatting metadata. Strip
     # that wrapper and keep just the human-readable symbol name.
     value = value.strip()
@@ -392,281 +423,302 @@ def clean_dwarf_value(value: str) -> str:
     return value
 
 
-def resolve_die_name(
-    offset: int,
-    die_by_offset: Dict[int, Dict[str, object]],
-    normalize_clones: bool,
-    visited: Optional[Set[int]] = None,
-) -> Optional[str]:
-    # Resolve a DIE name, following `DW_AT_specification` and
-    # `DW_AT_abstract_origin` links until a concrete symbol name is found.
-    #
-    # - `DW_AT_specification` typically connects a concrete definition back to a
-    #   separate declaration DIE that owns the canonical name.
-    # - `DW_AT_abstract_origin` typically connects an inlined instance or cloned
-    #   concrete DIE back to the abstract origin DIE that owns the canonical
-    #   inline-subroutine identity.
-    #
-    # `visited` prevents cycles in malformed or unexpected DWARF graphs.
-    #
-    # Args:
-    # - offset: DIE offset to resolve.
-    # - die_by_offset: parsed DWARF DIE table for one input file.
-    # - normalize_clones: whether clone suffixes should be stripped from the
-    #   final symbol name.
-    # - visited: recursion guard for origin/specification chains.
-    #
-    # Returns:
-    # - the best normalized symbol name for the DIE, or `None` if no name can be
-    #   recovered.
-    if visited is None:
-        visited = set()
-    if offset in visited:
-        return None
-    visited.add(offset)
-    die = die_by_offset.get(offset)
-    if not die:
-        return None
-    name = die.get("name") or die.get("linkage_name")
-    if name:
-        return normalize_name(str(name), normalize_clones)
-    spec = die.get("specification")
-    if isinstance(spec, int):
-        resolved = resolve_die_name(spec, die_by_offset, normalize_clones, visited)
-        if resolved:
-            return resolved
-    origin = die.get("abstract_origin")
-    if isinstance(origin, int):
-        return resolve_die_name(origin, die_by_offset, normalize_clones, visited)
-    return None
+class DwarfScanner:
+    """
+    Small stateful DWARF scanner.
 
+    The class keeps the current DIE table and the clone-normalization setting in
+    one place so the inline-only inference reads more like a straight parser
+    than a collection of generic helper calls.
+    """
 
-def die_object_hint(
-    die: Dict[str, object],
-    die_by_offset: Dict[int, Dict[str, object]],
-) -> Optional[str]:
-    # Resolve a DWARF DIE back to the leaf object that should own its gcno.
-    #
-    # The best case is reading DWARF from a leaf object file directly, in which
-    # case the object path is already known. When scanning a linked image, the
-    # fallback is the containing compile unit: `DW_AT_name` gives the source
-    # file and `DW_AT_comp_dir` anchors relative paths so they can be converted
-    # back into the likely `foo.o -> foo.gcno` location.
-    #
-    # Args:
-    # - die: the DIE whose owning object is being inferred.
-    # - die_by_offset: parsed DWARF DIE table used to find the containing
-    #   compile unit.
-    #
-    # Returns:
-    # - a leaf object path that appears to own the corresponding gcno, or
-    #   `None` if provenance is too weak to scope safely.
-    direct_object = die.get("dwarf_object")
-    if isinstance(direct_object, str) and object_has_matching_gcno(direct_object):
-        return normalize_object_path(direct_object)
+    def __init__(self, normalize_clones: bool):
+        self.normalize_clones = normalize_clones
+        self.die_by_offset: DieMap = {}
 
-    cu_offset = die.get("cu_offset")
-    if not isinstance(cu_offset, int):
-        return None
-    cu_die = die_by_offset.get(cu_offset)
-    if not cu_die:
-        return None
-    source_name = cu_die.get("cu_name")
-    if not isinstance(source_name, str):
-        return None
-    comp_dir = cu_die.get("cu_comp_dir")
-    return object_from_source_path(
-        source_name,
-        comp_dir if isinstance(comp_dir, str) else None,
-    )
+    def resolve_name(
+        self,
+        offset: int,
+        visited: Optional[Set[int]] = None,
+    ) -> Optional[str]:
+        """
+        Resolve the best symbol name for one DIE.
+        """
+        if visited is None:
+            visited = set()
+        if offset in visited:
+            return None
+        visited.add(offset)
 
+        die = self.die_by_offset.get(offset)
+        if not die:
+            return None
 
-def resolve_die_identity(
-    offset: int,
-    die_by_offset: Dict[int, Dict[str, object]],
-    normalize_clones: bool,
-    visited: Optional[Set[int]] = None,
-) -> Optional[Tuple[str, Optional[str]]]:
-    # Resolve both the symbol name and the object hint for a DIE. This keeps
-    # DWARF-derived inline removals scoped to one gcno when compile-unit
-    # provenance is good enough to identify the leaf object.
-    #
-    # Args:
-    # - offset: DIE offset to resolve.
-    # - die_by_offset: parsed DWARF DIE table for one input file.
-    # - normalize_clones: whether clone suffixes should be stripped from the
-    #   recovered symbol name.
-    # - visited: recursion guard for origin/specification chains.
-    #
-    # Returns:
-    # - `(function_name, object_hint)` when both the name and any available
-    #   object provenance have been resolved, or `None` when the DIE cannot be
-    #   identified.
-    if visited is None:
-        visited = set()
-    if offset in visited:
-        return None
-    visited.add(offset)
-    die = die_by_offset.get(offset)
-    if not die:
+        name = die.get("name") or die.get("linkage_name")
+        if name:
+            return normalize_name(str(name), self.normalize_clones)
+
+        spec = die.get("specification")
+        if isinstance(spec, int):
+            resolved = self.resolve_name(spec, visited)
+            if resolved:
+                return resolved
+
+        origin = die.get("abstract_origin")
+        if isinstance(origin, int):
+            return self.resolve_name(origin, visited)
         return None
 
-    name = die.get("name") or die.get("linkage_name")
-    if name:
-        return normalize_name(str(name), normalize_clones), die_object_hint(die, die_by_offset)
+    def object_hint(self, die: Dict[str, object]) -> Optional[str]:
+        """
+        Resolve the leaf object that should own the gcno for one DIE.
+        """
+        direct_object = die.get("dwarf_object")
+        if isinstance(direct_object, str) and object_has_matching_gcno(direct_object):
+            return normalize_object_path(direct_object)
 
-    spec = die.get("specification")
-    if isinstance(spec, int):
-        resolved = resolve_die_identity(spec, die_by_offset, normalize_clones, visited)
-        if resolved:
-            return resolved
-    origin = die.get("abstract_origin")
-    if isinstance(origin, int):
-        return resolve_die_identity(origin, die_by_offset, normalize_clones, visited)
-    return None
+        cu_offset = die.get("cu_offset")
+        if not isinstance(cu_offset, int):
+            return None
+        cu_die = self.die_by_offset.get(cu_offset)
+        if not cu_die:
+            return None
+        source_name = cu_die.get("cu_name")
+        if not isinstance(source_name, str):
+            return None
+        comp_dir = cu_die.get("cu_comp_dir")
+        return object_from_source_path(
+            source_name,
+            comp_dir if isinstance(comp_dir, str) else None,
+        )
+
+    def resolve_identity(
+        self,
+        offset: int,
+        visited: Optional[Set[int]] = None,
+    ) -> Optional[FuncKey]:
+        """
+        Resolve both the function name and any object hint for one DIE.
+        """
+        if visited is None:
+            visited = set()
+        if offset in visited:
+            return None
+        visited.add(offset)
+
+        die = self.die_by_offset.get(offset)
+        if not die:
+            return None
+
+        name = die.get("name") or die.get("linkage_name")
+        if name:
+            return normalize_name(str(name), self.normalize_clones), self.object_hint(die)
+
+        spec = die.get("specification")
+        if isinstance(spec, int):
+            resolved = self.resolve_identity(spec, visited)
+            if resolved:
+                return resolved
+
+        origin = die.get("abstract_origin")
+        if isinstance(origin, int):
+            return self.resolve_identity(origin, visited)
+        return None
+
+    def scan_one(self, path: str) -> Tuple[Dict[FuncKey, Set[FuncKey]], Set[FuncKey]]:
+        """
+        Scan one DWARF input file and return inline relationships plus functions
+        that still look defined out-of-line.
+        """
+        self.parse_path(path)
+        return self.collect_results()
+
+    def parse_path(self, path: str) -> None:
+        """Parse one DWARF file into the current DIE table."""
+        self.die_by_offset = {}
+        stack: List[int] = []
+        current_offset: Optional[int] = None
+        current_cu_offset: Optional[int] = None
+        dwarf_object_hint = normalize_object_path(path) if path.endswith(".o") else None
+
+        for line in iter_readelf(["readelf", "--debug-dump=info", "--wide", path]):
+            header = DIE_RE.match(line)
+            if header:
+                current_offset, current_cu_offset = self.start_die(
+                    header, stack, current_cu_offset, dwarf_object_hint
+                )
+                continue
+
+            if current_offset is None:
+                continue
+
+            self.parse_attr_line(current_offset, line)
+
+    def start_die(
+        self,
+        header: re.Match[str],
+        stack: List[int],
+        current_cu_offset: Optional[int],
+        dwarf_object_hint: Optional[str],
+    ) -> Tuple[int, Optional[int]]:
+        """Create one DIE from a readelf header line."""
+        depth = int(header.group("depth"))
+        offset = int(header.group("offset"), 16)
+        tag = header.group("tag")
+
+        while len(stack) > depth:
+            stack.pop()
+
+        parent = stack[-1] if stack else None
+        if tag == "DW_TAG_compile_unit":
+            current_cu_offset = offset
+
+        self.die_by_offset[offset] = {
+            "tag": tag,
+            "name": None,
+            "linkage_name": None,
+            "abstract_origin": None,
+            "specification": None,
+            "parent": parent,
+            "has_code": False,
+            "cu_offset": current_cu_offset,
+            "cu_name": None,
+            "cu_comp_dir": None,
+            "dwarf_object": dwarf_object_hint,
+        }
+        stack.append(offset)
+        return offset, current_cu_offset
+
+    def collect_results(self) -> Tuple[Dict[FuncKey, Set[FuncKey]], Set[FuncKey]]:
+        """Collect inline relationships and still-defined functions."""
+        inlined_callers: Dict[FuncKey, Set[FuncKey]] = defaultdict(set)
+        defined: Set[FuncKey] = set()
+        for offset, die in self.die_by_offset.items():
+            self.collect_defined(offset, die, defined)
+            self.collect_inline_callers(die, inlined_callers)
+        return inlined_callers, defined
+
+    def collect_defined(
+        self,
+        offset: int,
+        die: Dict[str, object],
+        defined: Set[FuncKey],
+    ) -> None:
+        """Record one subprogram as defined when it still has code."""
+        if die.get("tag") != "DW_TAG_subprogram" or not die.get("has_code"):
+            return
+        identity = self.resolve_identity(offset)
+        if identity:
+            defined.add(identity)
+
+    def collect_inline_callers(
+        self,
+        die: Dict[str, object],
+        inlined_callers: Dict[FuncKey, Set[FuncKey]],
+    ) -> None:
+        """Record one `inlined callee -> caller` relationship."""
+        if die.get("tag") != "DW_TAG_inlined_subroutine":
+            return
+        callee = self.resolve_inline_callee(die)
+        caller = self.resolve_inline_caller(die)
+        if callee and caller:
+            inlined_callers[callee].add(caller)
+
+    def parse_attr_line(self, current_offset: int, line: str) -> None:
+        """
+        Update one DIE from one readelf attribute line.
+        """
+        if DWARF_LOW_PC_RE.search(line) or DWARF_RANGES_RE.search(line):
+            self.die_by_offset[current_offset]["has_code"] = True
+            return
+
+        match = DWARF_NAME_RE.search(line)
+        if match:
+            value = clean_dwarf_value(match.group("value"))
+            self.die_by_offset[current_offset]["name"] = value
+
+            if self.die_by_offset[current_offset].get("tag") == "DW_TAG_compile_unit":
+                self.die_by_offset[current_offset]["cu_name"] = value
+                self.die_by_offset[current_offset]["cu_offset"] = current_offset
+            return
+
+        match = DWARF_COMP_DIR_RE.search(line)
+        if match:
+            self.die_by_offset[current_offset]["cu_comp_dir"] = clean_dwarf_value(
+                match.group("value")
+            )
+            return
+
+        match = DWARF_LINKAGE_RE.search(line)
+        if match:
+            self.die_by_offset[current_offset]["linkage_name"] = clean_dwarf_value(
+                match.group("value")
+            )
+            return
+
+        match = DWARF_ABSTRACT_ORIGIN_RE.search(line)
+        if match:
+            self.die_by_offset[current_offset]["abstract_origin"] = int(
+                match.group("offset"), 16
+            )
+            return
+
+        match = DWARF_SPECIFICATION_RE.search(line)
+        if match:
+            self.die_by_offset[current_offset]["specification"] = int(
+                match.group("offset"), 16
+            )
+
+    def resolve_inline_callee(self, die: Dict[str, object]) -> Optional[FuncKey]:
+        """
+        Resolve the callee identity for one `DW_TAG_inlined_subroutine` DIE.
+        """
+        abstract_origin = die.get("abstract_origin")
+        if not isinstance(abstract_origin, int):
+            return None
+        return self.resolve_identity(abstract_origin)
+
+    def resolve_inline_caller(self, die: Dict[str, object]) -> Optional[FuncKey]:
+        """
+        Walk parent DIEs upward until the containing subprogram is found.
+        """
+        parent = die.get("parent")
+        while isinstance(parent, int):
+            parent_die = self.die_by_offset.get(parent)
+            if not parent_die:
+                return None
+            if parent_die.get("tag") == "DW_TAG_subprogram":
+                return self.resolve_identity(parent)
+            parent = parent_die.get("parent")
+        return None
 
 
 def parse_dwarf_data(
     paths: Iterable[str],
     normalize_clones: bool,
-) -> Tuple[Dict[Tuple[str, Optional[str]], Set[Tuple[str, Optional[str]]]], Set[Tuple[str, Optional[str]]]]:
-    # Build two indexes from DWARF:
-    # - inline callee -> set of callers that inline it
-    # - functions that still have an out-of-line code range somewhere
-    #
-    # A function can be safely treated as "inline-only removed" when it has no
-    # out-of-line definition but every caller that inlined it was removed.
-    #
-    # Args:
-    # - paths: binaries or object files whose DWARF info should be scanned.
-    # - normalize_clones: whether clone suffixes should be normalized while
-    #   recovering function identities.
-    #
-    # Returns:
-    # - `inline_callee -> {caller, ...}` for inline expansions observed in DWARF
-    # - the set of functions that still appear to have concrete out-of-line code
-    inlined_callers: Dict[Tuple[str, Optional[str]], Set[Tuple[str, Optional[str]]]] = defaultdict(set)
-    defined: Set[Tuple[str, Optional[str]]] = set()
+) -> Tuple[Dict[FuncKey, Set[FuncKey]], Set[FuncKey]]:
+    """
+    Scan DWARF inputs and collect inline-callee relationships plus subprograms
+    that still appear to own concrete code ranges.
+    """
+    scanner = DwarfScanner(normalize_clones)
+    inlined_callers: Dict[FuncKey, Set[FuncKey]] = defaultdict(set)
+    defined: Set[FuncKey] = set()
     for path in paths:
-        die_by_offset: Dict[int, Dict[str, object]] = {}
-        stack: List[int] = []
-        current_offset: Optional[int] = None
-        current_cu_offset: Optional[int] = None
-        dwarf_object_hint = normalize_object_path(path) if path.endswith(".o") else None
-        for line in iter_readelf(["readelf", "--debug-dump=info", "--wide", path]):
-            header = DIE_RE.match(line)
-            if header:
-                depth = int(header.group("depth"))
-                offset = int(header.group("offset"), 16)
-                tag = header.group("tag")
-                while len(stack) > depth:
-                    stack.pop()
-                parent = stack[-1] if stack else None
-                if tag == "DW_TAG_compile_unit":
-                    current_cu_offset = offset
-                # Keep a lightweight representation of each DIE so later passes
-                # can resolve names and walk parent relationships.
-                die_by_offset[offset] = {
-                    "tag": tag,
-                    "name": None,
-                    "linkage_name": None,
-                    "abstract_origin": None,
-                    "specification": None,
-                    "parent": parent,
-                    "has_code": False,
-                    "cu_offset": current_cu_offset,
-                    "cu_name": None,
-                    "cu_comp_dir": None,
-                    "dwarf_object": dwarf_object_hint,
-                }
-                stack.append(offset)
-                current_offset = offset
-                continue
-            if current_offset is None:
-                continue
-            if DWARF_LOW_PC_RE.search(line) or DWARF_RANGES_RE.search(line):
-                # Treat any concrete code range as evidence that the function
-                # still exists out-of-line and should not be auto-removed.
-                die_by_offset[current_offset]["has_code"] = True
-                continue
-            match = DWARF_NAME_RE.search(line)
-            if match:
-                value = clean_dwarf_value(match.group("value"))
-                die_by_offset[current_offset]["name"] = value
-                if die_by_offset[current_offset].get("tag") == "DW_TAG_compile_unit":
-                    # For compile units, `DW_AT_name` is the source file name.
-                    # Later we combine it with `DW_AT_comp_dir` to recover the
-                    # leaf object/gcno path for DWARF-derived removals.
-                    die_by_offset[current_offset]["cu_name"] = value
-                    die_by_offset[current_offset]["cu_offset"] = current_offset
-                continue
-            match = DWARF_COMP_DIR_RE.search(line)
-            if match:
-                # `DW_AT_comp_dir` is only needed for path recovery. Relative
-                # `DW_AT_name` values are not useful for scoping without it.
-                value = clean_dwarf_value(match.group("value"))
-                die_by_offset[current_offset]["cu_comp_dir"] = value
-                continue
-            match = DWARF_LINKAGE_RE.search(line)
-            if match:
-                # Prefer linkage names when present because they are usually the
-                # most stable cross-reference between inlined and concrete DIEs.
-                die_by_offset[current_offset]["linkage_name"] = clean_dwarf_value(
-                    match.group("value")
-                )
-                continue
-            match = DWARF_ABSTRACT_ORIGIN_RE.search(line)
-            if match:
-                # `DW_AT_abstract_origin` ties an inlined subroutine back to the
-                # abstract DIE that owns the callee's canonical identity.
-                die_by_offset[current_offset]["abstract_origin"] = int(
-                    match.group("offset"), 16
-                )
-                continue
-            match = DWARF_SPECIFICATION_RE.search(line)
-            if match:
-                # `DW_AT_specification` ties a concrete definition back to a
-                # declaration DIE that may carry the canonical source-level name.
-                die_by_offset[current_offset]["specification"] = int(
-                    match.group("offset"), 16
-                )
+        file_inlined, file_defined = scanner.scan_one(path)
+        defined.update(file_defined)
 
-        for offset, die in die_by_offset.items():
-            if die.get("tag") == "DW_TAG_subprogram" and die.get("has_code"):
-                identity = resolve_die_identity(offset, die_by_offset, normalize_clones)
-                if identity:
-                    defined.add(identity)
-            if die.get("tag") != "DW_TAG_inlined_subroutine":
-                continue
-            abstract_origin = die.get("abstract_origin")
-            if not isinstance(abstract_origin, int):
-                continue
-            # Inlined subroutines do not name the callee directly in a way that
-            # is reliable across compilers; the abstract-origin chain is the
-            # stable way to recover "which function was inlined here?".
-            callee = resolve_die_identity(abstract_origin, die_by_offset, normalize_clones)
-            parent = die.get("parent")
-            caller: Optional[Tuple[str, Optional[str]]] = None
-            while isinstance(parent, int):
-                parent_die = die_by_offset.get(parent)
-                if not parent_die:
-                    break
-                if parent_die.get("tag") == "DW_TAG_subprogram":
-                    # Walk up until we find the containing subprogram; that is
-                    # the out-of-line function that performed the inline call.
-                    caller = resolve_die_identity(parent, die_by_offset, normalize_clones)
-                    break
-                parent = parent_die.get("parent")
-            if callee and caller:
-                inlined_callers[callee].add(caller)
+        for callee, callers in file_inlined.items():
+            inlined_callers[callee].update(callers)
     return inlined_callers, defined
 
 
 def find_inline_only_functions(
-    remove_functions: Set[Tuple[str, Optional[str]]],
-    inline_info: Dict[Tuple[str, Optional[str]], Set[Tuple[str, Optional[str]]]],
-    defined_functions: Set[Tuple[str, Optional[str]]],
-) -> Set[Tuple[str, Optional[str]]]:
+    remove_functions: Set[FuncKey],
+    inline_info: Dict[FuncKey, Set[FuncKey]],
+    defined_functions: Set[FuncKey],
+) -> Set[FuncKey]:
+    """Infer safe inline-only removals from linker removals plus DWARF data."""
     # Infer extra removals for callees that only survive as inlined DWARF
     # entries and whose every caller is already known to be discarded.
     #
@@ -679,25 +731,27 @@ def find_inline_only_functions(
     #
     # Returns:
     # - additional scoped removals that are safe to infer from DWARF alone.
-    extra: Set[Tuple[str, Optional[str]]] = set()
+    extra: Set[FuncKey] = set()
     for callee, callers in inline_info.items():
         if not callers or callee in remove_functions:
             continue
+
         # Only auto-remove DWARF candidates when both the callee and its caller
         # set can be tied to concrete leaf objects. Otherwise the inference is
         # informational but not safe enough to rewrite gcno files.
         if callee[1] is None or any(caller[1] is None for caller in callers):
             continue
+
         if callee in defined_functions:
             continue
+
         if callers.issubset(remove_functions):
             extra.add(callee)
     return extra
 
 
-def main() -> int:
-    # Glue the linker parser and optional DWARF analysis together, then emit a
-    # flat text list suitable for `gcov-strip`.
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description="Extract removed function names from ld --print-gc-sections output."
     )
@@ -723,8 +777,8 @@ def main() -> int:
         action="store_true",
         help=(
             "Fail if a discarded function cannot be resolved to a single leaf "
-            "object file. Without this flag, unresolved entries fall back to "
-            "legacy bare-name output."
+            "object file. Ambiguous or unresolved entries become review "
+            "comments without this flag."
         ),
     )
     parser.add_argument(
@@ -733,43 +787,42 @@ def main() -> int:
         default=[],
         help=(
             "Path to a binary/object file with DWARF info; may be repeated. "
-            "Inline-only functions are added when all their inlined callers are removed."
+            "Inline-only functions are added when all their inlined callers "
+            "are removed."
         ),
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    try:
-        removed_entries = extract_functions(sys.stdin, args.normalize_clones, not args.quiet)
-        functions, warnings, review_lines = resolve_removed_entries(
-            removed_entries, args.normalize_clones, args.strict_object_match
-        )
-        for warning in warnings:
-            print(f"warning: {warning}", file=sys.stderr)
 
-        resolved_removals = {parse_scoped_entry(line) for line in functions}
-        inline_only: List[str] = []
-        if args.dwarf:
-            inlined, defined = parse_dwarf_data(args.dwarf, args.normalize_clones)
-            inline_only_entries = sorted(
-                find_inline_only_functions(resolved_removals, inlined, defined)
-            )
-            resolved_inline, inline_warnings, inline_review_lines = resolve_removed_entries(
-                inline_only_entries,
-                args.normalize_clones,
-                args.strict_object_match,
-            )
-            for warning in inline_warnings:
-                print(f"warning: {warning}", file=sys.stderr)
-            review_lines.extend(inline_review_lines)
-            inline_only = resolved_inline
-    except RuntimeError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+def resolve_inline_only(
+    args: argparse.Namespace,
+    functions: List[str],
+) -> Tuple[List[str], List[str], List[str]]:
+    """Resolve extra inline-only removals from DWARF input."""
+    if not args.dwarf:
+        return [], [], []
 
-    seen = set(functions)
-    seen.update(inline_only)
-    if args.output:
-        with open(args.output, "w", encoding="utf-8") as handle:
+    resolved_removals = {parse_scoped_entry(line) for line in functions}
+    inlined, defined = parse_dwarf_data(args.dwarf, args.normalize_clones)
+    inline_only_entries = sorted(
+        find_inline_only_functions(resolved_removals, inlined, defined)
+    )
+    return resolve_removed_entries(
+        inline_only_entries,
+        args.normalize_clones,
+        args.strict_object_match,
+    )
+
+
+def write_output(
+    output_path: Optional[str],
+    functions: List[str],
+    inline_only: List[str],
+    review_lines: List[str],
+) -> None:
+    """Write or print the generated config lines."""
+    if output_path:
+        with open(output_path, "w", encoding="utf-8") as handle:
             for name in functions:
                 handle.write(f"{name}\n")
             if inline_only:
@@ -780,17 +833,43 @@ def main() -> int:
                 handle.write("\n")
                 for line in review_lines:
                     handle.write(f"{line}\n")
-    else:
-        for name in functions:
+        return
+
+    for name in functions:
+        print(name)
+    if inline_only:
+        print("\n# Detected inline functions by DWARF scanning")
+        for name in inline_only:
             print(name)
-        if inline_only:
-            print("\n# Detected inline functions by DWARF scanning")
-            for name in inline_only:
-                print(name)
-        if review_lines:
-            print()
-            for line in review_lines:
-                print(line)
+    if review_lines:
+        print()
+        for line in review_lines:
+            print(line)
+
+
+def main() -> int:
+    """Glue linker parsing, DWARF inference, and config output together."""
+    args = parse_args()
+
+    try:
+        removed_entries = extract_functions(sys.stdin, args.normalize_clones, not args.quiet)
+        functions, warnings, review_lines = resolve_removed_entries(
+            removed_entries, args.normalize_clones, args.strict_object_match
+        )
+        for warning in warnings:
+            print(f"warning: {warning}", file=sys.stderr)
+
+        inline_only, inline_warnings, inline_review_lines = resolve_inline_only(
+            args, functions
+        )
+        for warning in inline_warnings:
+            print(f"warning: {warning}", file=sys.stderr)
+        review_lines.extend(inline_review_lines)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    write_output(args.output, functions, inline_only, review_lines)
     return 0
 
 
