@@ -148,6 +148,19 @@ contain commented review notes instead of an unsafe bare-name fallback:
 # merge
 ```
 
+If a removed symbol only matches leaf objects without `*.gcno` files and there
+is no coverage-bearing DWARF subprogram provenance for it, the tool tags it
+separately as likely non-covered code, for example hand-written assembly.
+Assembler DWARF does not block this classification:
+
+```txt
+# INFO likely assembly/no-coverage removal for foo from arch/head.o
+# reason: no gcno coverage
+# candidates: arch/head.o
+# foo
+
+```
+
 ## Strict mode
 
 - `ld_gc_sections_to_funcs.py --strict-object-match` fails instead of falling

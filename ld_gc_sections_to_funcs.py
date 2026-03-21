@@ -35,6 +35,7 @@ from typing import DefaultDict, Dict, Iterable, List, Optional, Set, Tuple
 FuncKey = Tuple[str, Optional[str]]
 SymbolIndex = DefaultDict[str, Set[str]]
 DieMap = Dict[int, Dict[str, object]]
+DefinedState = Tuple[Set[FuncKey], Set[str]]
 
 
 REMOVAL_RE = re.compile(
@@ -59,6 +60,9 @@ DWARF_NAME_RE = re.compile(r"DW_AT_name\s*:\s*(?P<value>.+)")
 # relative `DW_AT_name` source path can be turned back into a likely object/gcno
 # location.
 DWARF_COMP_DIR_RE = re.compile(r"DW_AT_comp_dir\s*:\s*(?P<value>.+)")
+# `DW_AT_language` lets us distinguish normal C compile units from assembler
+# units that may still carry DWARF subprograms even though no gcno file exists.
+DWARF_LANGUAGE_RE = re.compile(r"DW_AT_language\s*:\s*(?P<value>.+)")
 # `DW_AT_linkage_name` / `DW_AT_MIPS_linkage_name` carry the linker-visible
 # symbol name when the plain source-level `DW_AT_name` is not unique enough.
 DWARF_LINKAGE_RE = re.compile(
@@ -227,6 +231,7 @@ def build_object_symbol_index(
     root: str,
     interesting_names: Set[str],
     normalize_clones: bool,
+    require_gcno: bool = True,
 ) -> SymbolIndex:
     """Build `function -> leaf objects` for names relevant to this run."""
     # Index leaf object definitions for the names we care about so aggregate
@@ -241,11 +246,12 @@ def build_object_symbol_index(
     #
     # Returns:
     # - `function_name -> {object_path, ...}` for leaf objects that appear to
-    #   define the function and also have a matching gcno file.
+    #   define the function. By default only objects with matching gcno files
+    #   are indexed, but callers can also ask for all leaf objects.
     by_name: SymbolIndex = defaultdict(set)
     for obj_path in iter_object_files(root):
         rel_path = normalize_object_path(obj_path)
-        if not object_has_matching_gcno(rel_path):
+        if require_gcno and not object_has_matching_gcno(rel_path):
             continue
         try:
             output = subprocess.check_output(
@@ -330,19 +336,28 @@ class RemovalResolver:
         removed_entries: List[FuncKey],
         normalize_clones: bool,
         strict: bool,
-        defined_functions: Optional[Set[FuncKey]] = None,
+        defined_state: Optional[DefinedState] = None,
     ):
         """Build the indexes needed to scope removals to leaf objects."""
+        defined_functions, assembly_defined_names = defined_state or (set(), set())
         self.strict = strict
         self.symbol_index = build_object_symbol_index(
             os.getcwd(),
             {name for name, _ in removed_entries},
             normalize_clones,
         )
+        self.all_symbol_index = build_object_symbol_index(
+            os.getcwd(),
+            {name for name, _ in removed_entries},
+            normalize_clones,
+            require_gcno=False,
+        )
         self.removed_objects = build_removed_object_set(removed_entries)
         self.surviving_symbols = build_surviving_symbol_index(
             defined_functions or set()
         )
+        self.defined_names = {name for name, _ in defined_functions or set()}
+        self.assembly_defined_names = assembly_defined_names or set()
 
     def resolve_one(
         self,
@@ -388,6 +403,7 @@ class RemovalResolver:
             f"{name} from {obj_path or '<unknown object>'}",
             f"# candidates: {joined}",
             f"# {name}",
+            "",
         ]
         return [], warnings, review_lines
 
@@ -397,6 +413,16 @@ class RemovalResolver:
         obj_path: Optional[str],
     ) -> Tuple[List[str], List[str], List[str]]:
         """Return warnings and optional review lines for one unresolved removal."""
+        uncovered_objects = sorted(
+            path
+            for path in self.all_symbol_index.get(name, set())
+            if not object_has_matching_gcno(path)
+        )
+        if uncovered_objects and (
+            name not in self.defined_names or name in self.assembly_defined_names
+        ):
+            return self.uncovered_result(name, obj_path, uncovered_objects)
+
         warnings = [
             f"Could not resolve {name} from {obj_path or '<unknown object>'} "
             "to a leaf object"
@@ -408,6 +434,31 @@ class RemovalResolver:
             f"{name} from {obj_path or '<unknown object>'}",
             "# candidates: none",
             f"# {name}",
+            "",
+        ]
+        return [], warnings, review_lines
+
+    def uncovered_result(
+        self,
+        name: str,
+        obj_path: Optional[str],
+        uncovered_objects: List[str],
+    ) -> Tuple[List[str], List[str], List[str]]:
+        """Return an info-style review block for likely non-covered code."""
+        joined = ", ".join(uncovered_objects)
+        warnings = [
+            f"{name} from {obj_path or '<unknown object>'} only matches leaf "
+            f"objects without gcno or DWARF function provenance ({joined})"
+        ]
+        if self.strict:
+            return [], warnings, []
+        review_lines = [
+            "# INFO likely assembly/no-coverage removal for "
+            f"{name} from {obj_path or '<unknown object>'}",
+            "# reason: no gcno coverage",
+            f"# candidates: {joined}",
+            f"# {name}",
+            "",
         ]
         return [], warnings, review_lines
 
@@ -416,7 +467,7 @@ def resolve_removed_entries(
     removed_entries: List[FuncKey],
     normalize_clones: bool,
     strict: bool,
-    defined_functions: Optional[Set[FuncKey]] = None,
+    defined_state: Optional[DefinedState] = None,
 ) -> Tuple[List[str], List[str], List[str]]:
     """Turn removed entries into active config lines and review notes."""
     # Resolve linker removals into config lines.
@@ -441,9 +492,11 @@ def resolve_removed_entries(
     #   building the leaf-object symbol index.
     # - strict: if true, unresolved or ambiguous mappings raise an error instead
     #   of being emitted as commented review entries.
-    # - defined_functions: `DW_TAG_subprogram` identities that still appear to
-    #   own code in non-`.o` DWARF inputs, used to identify which same-name leaf
-    #   object survived in the final linked image.
+    # - defined_state: surviving DWARF state from non-`.o` inputs:
+    #   `({defined FuncKeys}, {assembler-defined names})`. The first half helps
+    #   identify which same-name leaf object survived in the final linked image;
+    #   the second half keeps assembler DWARF from blocking the likely
+    #   no-coverage classification.
     #
     # Returns:
     # - active config lines safe for `gcov-strip`
@@ -453,7 +506,7 @@ def resolve_removed_entries(
         removed_entries,
         normalize_clones,
         strict,
-        defined_functions,
+        defined_state,
     )
 
     resolved_lines: List[str] = []
@@ -552,6 +605,7 @@ class DwarfScanner:
     def __init__(self, normalize_clones: bool):
         self.normalize_clones = normalize_clones
         self.die_by_offset: DieMap = {}
+        self.assembly_defined_names: Set[str] = set()
 
     def resolve_name(
         self,
@@ -727,6 +781,8 @@ class DwarfScanner:
         identity = self.resolve_identity(offset)
         if identity:
             defined.add(identity)
+            if self.is_assembly_die(die):
+                self.assembly_defined_names.add(identity[0])
 
     def collect_inline_callers(
         self,
@@ -764,6 +820,12 @@ class DwarfScanner:
             self.die_by_offset[current_offset]["cu_comp_dir"] = clean_dwarf_value(
                 match.group("value")
             )
+            return
+
+        match = DWARF_LANGUAGE_RE.search(line)
+        if match:
+            language = clean_dwarf_value(match.group("value"))
+            self.die_by_offset[current_offset]["cu_language"] = language
             return
 
         match = DWARF_LINKAGE_RE.search(line)
@@ -809,11 +871,31 @@ class DwarfScanner:
             parent = parent_die.get("parent")
         return None
 
+    def is_assembly_die(self, die: Dict[str, object]) -> bool:
+        """Return true when one DIE belongs to an assembler compile unit."""
+        cu_offset = die.get("cu_offset")
+        if not isinstance(cu_offset, int):
+            return False
+
+        cu_die = self.die_by_offset.get(cu_offset)
+        if not cu_die:
+            return False
+
+        language = cu_die.get("cu_language")
+        if isinstance(language, str) and "assembler" in language.lower():
+            return True
+
+        source_name = cu_die.get("cu_name")
+        if isinstance(source_name, str) and source_name.endswith((".S", ".s")):
+            return True
+
+        return False
+
 
 def parse_dwarf_data(
     paths: Iterable[str],
     normalize_clones: bool,
-) -> Tuple[Dict[FuncKey, Set[FuncKey]], Set[FuncKey], Set[FuncKey]]:
+) -> Tuple[Dict[FuncKey, Set[FuncKey]], Set[FuncKey], Set[FuncKey], Set[str]]:
     """
     Scan DWARF inputs and collect inline-callee relationships plus subprograms
     that still appear to own concrete code ranges.
@@ -830,7 +912,7 @@ def parse_dwarf_data(
 
         for callee, callers in file_inlined.items():
             inlined_callers[callee].update(callers)
-    return inlined_callers, defined, final_defined
+    return inlined_callers, defined, final_defined, scanner.assembly_defined_names
 
 
 def find_inline_only_functions(
@@ -976,8 +1058,9 @@ def main() -> int:
         inlined: Dict[FuncKey, Set[FuncKey]] = {}
         defined: Set[FuncKey] = set()
         final_defined: Set[FuncKey] = set()
+        assembly_defined_names: Set[str] = set()
         if args.dwarf:
-            inlined, defined, final_defined = parse_dwarf_data(
+            inlined, defined, final_defined, assembly_defined_names = parse_dwarf_data(
                 args.dwarf,
                 args.normalize_clones,
             )
@@ -987,7 +1070,7 @@ def main() -> int:
             removed_entries,
             args.normalize_clones,
             args.strict_object_match,
-            final_defined,
+            (final_defined, assembly_defined_names),
         )
         for warning in warnings:
             print(f"warning: {warning}", file=sys.stderr)
