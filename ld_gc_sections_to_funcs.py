@@ -30,12 +30,27 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
-from typing import DefaultDict, Dict, Iterable, List, Optional, Set, Tuple
+from typing import DefaultDict, Dict, Iterable, List, NamedTuple, Optional, Set, Tuple
 
 FuncKey = Tuple[str, Optional[str]]
 SymbolIndex = DefaultDict[str, Set[str]]
 DieMap = Dict[int, Dict[str, object]]
-DefinedState = Tuple[Set[FuncKey], Set[str]]
+
+
+class DwarfResolutionState(NamedTuple):
+    """Final-ELF DWARF state used while resolving removed functions."""
+
+    final_defined_functions: Set[FuncKey]
+    assembly_defined_names: Set[str]
+
+
+class DwarfParseResult(NamedTuple):
+    """Collected DWARF data used by the removal and inline-only passes."""
+
+    inlined_callers: Dict[FuncKey, Set[FuncKey]]
+    defined_functions: Set[FuncKey]
+    final_defined_functions: Set[FuncKey]
+    assembly_defined_names: Set[str]
 
 
 REMOVAL_RE = re.compile(
@@ -227,11 +242,11 @@ def iter_object_files(root: str) -> Iterable[str]:
                 yield os.path.join(base, filename)
 
 
-def build_object_symbol_index(
+def build_symbol_index(
     root: str,
     interesting_names: Set[str],
     normalize_clones: bool,
-    require_gcno: bool = True,
+    require_gcno: bool,
 ) -> SymbolIndex:
     """Build `function -> leaf objects` for names relevant to this run."""
     # Index leaf object definitions for the names we care about so aggregate
@@ -279,6 +294,24 @@ def build_object_symbol_index(
             by_name[name].add(rel_path)
             seen_in_object.add(name)
     return by_name
+
+
+def build_gcno_symbol_index(
+    root: str,
+    interesting_names: Set[str],
+    normalize_clones: bool,
+) -> SymbolIndex:
+    """Build `function -> leaf objects` for objects that own gcno files."""
+    return build_symbol_index(root, interesting_names, normalize_clones, True)
+
+
+def build_leaf_symbol_index(
+    root: str,
+    interesting_names: Set[str],
+    normalize_clones: bool,
+) -> SymbolIndex:
+    """Build `function -> leaf objects` for all leaf objects under the tree."""
+    return build_symbol_index(root, interesting_names, normalize_clones, False)
 
 
 def build_removed_object_set(removed_entries: List[FuncKey]) -> Set[str]:
@@ -336,28 +369,29 @@ class RemovalResolver:
         removed_entries: List[FuncKey],
         normalize_clones: bool,
         strict: bool,
-        defined_state: Optional[DefinedState] = None,
+        dwarf_state: Optional[DwarfResolutionState] = None,
     ):
         """Build the indexes needed to scope removals to leaf objects."""
-        defined_functions, assembly_defined_names = defined_state or (set(), set())
+        dwarf_state = dwarf_state or DwarfResolutionState(set(), set())
         self.strict = strict
-        self.symbol_index = build_object_symbol_index(
+        self.gcno_symbol_index = build_gcno_symbol_index(
             os.getcwd(),
             {name for name, _ in removed_entries},
             normalize_clones,
         )
-        self.all_symbol_index = build_object_symbol_index(
+        self.leaf_symbol_index = build_leaf_symbol_index(
             os.getcwd(),
             {name for name, _ in removed_entries},
             normalize_clones,
-            require_gcno=False,
         )
         self.removed_objects = build_removed_object_set(removed_entries)
         self.surviving_symbols = build_surviving_symbol_index(
-            defined_functions or set()
+            dwarf_state.final_defined_functions
         )
-        self.defined_names = {name for name, _ in defined_functions or set()}
-        self.assembly_defined_names = assembly_defined_names or set()
+        self.defined_names = {
+            name for name, _ in dwarf_state.final_defined_functions
+        }
+        self.assembly_defined_names = dwarf_state.assembly_defined_names
 
     def resolve_one(
         self,
@@ -368,7 +402,7 @@ class RemovalResolver:
         if obj_path and object_has_matching_gcno(obj_path):
             return [f"{obj_path}:{name}"], [], []
 
-        leaf_objects = sorted(self.symbol_index.get(name, set()))
+        leaf_objects = sorted(self.gcno_symbol_index.get(name, set()))
         chosen_object, candidate_objects = pick_leaf_object(
             name,
             leaf_objects,
@@ -415,7 +449,7 @@ class RemovalResolver:
         """Return warnings and optional review lines for one unresolved removal."""
         uncovered_objects = sorted(
             path
-            for path in self.all_symbol_index.get(name, set())
+            for path in self.leaf_symbol_index.get(name, set())
             if not object_has_matching_gcno(path)
         )
         if uncovered_objects and (
@@ -467,7 +501,7 @@ def resolve_removed_entries(
     removed_entries: List[FuncKey],
     normalize_clones: bool,
     strict: bool,
-    defined_state: Optional[DefinedState] = None,
+    dwarf_state: Optional[DwarfResolutionState] = None,
 ) -> Tuple[List[str], List[str], List[str]]:
     """Turn removed entries into active config lines and review notes."""
     # Resolve linker removals into config lines.
@@ -492,11 +526,10 @@ def resolve_removed_entries(
     #   building the leaf-object symbol index.
     # - strict: if true, unresolved or ambiguous mappings raise an error instead
     #   of being emitted as commented review entries.
-    # - defined_state: surviving DWARF state from non-`.o` inputs:
-    #   `({defined FuncKeys}, {assembler-defined names})`. The first half helps
-    #   identify which same-name leaf object survived in the final linked image;
-    #   the second half keeps assembler DWARF from blocking the likely
-    #   no-coverage classification.
+    # - dwarf_state: surviving DWARF state from non-`.o` inputs. The
+    #   final-defined functions help identify which same-name leaf object
+    #   survived in the linked image; the assembler-defined names keep
+    #   assembler DWARF from blocking the likely no-coverage classification.
     #
     # Returns:
     # - active config lines safe for `gcov-strip`
@@ -506,7 +539,7 @@ def resolve_removed_entries(
         removed_entries,
         normalize_clones,
         strict,
-        defined_state,
+        dwarf_state,
     )
 
     resolved_lines: List[str] = []
@@ -547,16 +580,11 @@ def normalize_name(name: str, normalize_clones: bool) -> str:
     return name
 
 
-def parse_scoped_entry(line: str) -> Tuple[str, Optional[str]]:
-    """Parse one config line into `(function, object_hint)`."""
-    # Config lines are either `function` or `object:function`. Keep the same
-    # parser locally so linker-derived and DWARF-derived removals can share the
-    # same scoped identity format.
-    if ":" not in line:
-        return line, None
+def parse_object_scoped_entry(line: str) -> FuncKey:
+    """Parse one `object:function` config line into `(function, object)`."""
     obj_path, function = line.rsplit(":", 1)
     if not obj_path or not function:
-        return line, None
+        raise RuntimeError(f"invalid object-scoped entry: {line}")
     return function, normalize_object_path(obj_path)
 
 
@@ -903,7 +931,7 @@ class DwarfScanner:
 def parse_dwarf_data(
     paths: Iterable[str],
     normalize_clones: bool,
-) -> Tuple[Dict[FuncKey, Set[FuncKey]], Set[FuncKey], Set[FuncKey], Set[str]]:
+) -> DwarfParseResult:
     """
     Scan DWARF inputs and collect inline-callee relationships plus subprograms
     that still appear to own concrete code ranges.
@@ -927,7 +955,12 @@ def parse_dwarf_data(
 
         for callee, callers in file_inlined.items():
             inlined_callers[callee].update(callers)
-    return inlined_callers, defined, final_defined, scanner.assembly_defined_names
+    return DwarfParseResult(
+        inlined_callers,
+        defined,
+        final_defined,
+        scanner.assembly_defined_names,
+    )
 
 
 def find_inline_only_functions(
@@ -1013,7 +1046,7 @@ def parse_args() -> argparse.Namespace:
 
 def resolve_inline_only_removals(
     args: argparse.Namespace,
-    functions: List[str],
+    resolved_config_lines: List[str],
     inlined: Dict[FuncKey, Set[FuncKey]],
     defined: Set[FuncKey],
 ) -> Tuple[List[str], List[str], List[str]]:
@@ -1025,7 +1058,9 @@ def resolve_inline_only_removals(
     if not inlined and not defined:
         return [], [], []
 
-    resolved_removals = {parse_scoped_entry(line) for line in functions}
+    resolved_removals = {
+        parse_object_scoped_entry(line) for line in resolved_config_lines
+    }
     inline_only_entries = sorted(
         find_inline_only_functions(resolved_removals, inlined, defined)
     )
@@ -1074,28 +1109,31 @@ def main() -> int:
     args = parse_args()
 
     try:
-        inlined: Dict[FuncKey, Set[FuncKey]] = {}
-        defined: Set[FuncKey] = set()
-        final_defined: Set[FuncKey] = set()
-        assembly_defined_names: Set[str] = set()
+        dwarf_data = DwarfParseResult(defaultdict(set), set(), set(), set())
         if args.dwarf:
-            inlined, defined, final_defined, assembly_defined_names = parse_dwarf_data(
+            dwarf_data = parse_dwarf_data(
                 args.dwarf,
                 args.normalize_clones,
             )
 
         removed_entries = extract_functions(sys.stdin, args.normalize_clones, not args.quiet)
-        functions, warnings, review_lines = resolve_removed_entries(
+        resolved_config_lines, warnings, review_lines = resolve_removed_entries(
             removed_entries,
             args.normalize_clones,
             args.strict_object_match,
-            (final_defined, assembly_defined_names),
+            DwarfResolutionState(
+                dwarf_data.final_defined_functions,
+                dwarf_data.assembly_defined_names,
+            ),
         )
         for warning in warnings:
             print(f"warning: {warning}", file=sys.stderr)
 
         inline_only, inline_warnings, inline_review_lines = resolve_inline_only_removals(
-            args, functions, inlined, defined
+            args,
+            resolved_config_lines,
+            dwarf_data.inlined_callers,
+            dwarf_data.defined_functions,
         )
         for warning in inline_warnings:
             print(f"warning: {warning}", file=sys.stderr)
@@ -1104,7 +1142,7 @@ def main() -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
-    write_output(args.output, functions, inline_only, review_lines)
+    write_output(args.output, resolved_config_lines, inline_only, review_lines)
     return 0
 
 
