@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
 """Convert linker `--print-gc-sections` output into removals for gcov-strip."""
 # pylint: disable=too-many-lines
 #
@@ -23,6 +22,9 @@
 # was already removed by the linker, the callee becomes a candidate for gcno
 # stripping as well. Missing or ambiguous object provenance leaves the entry in
 # review-only form instead of widening the removal scope.
+#
+# Copyright (c) 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
 
 import argparse
 import os
