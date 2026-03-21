@@ -8,6 +8,7 @@ config files. When a function is removed, the following records that belong to
 that function are also skipped so gcov/gcovr no longer report coverage for
 code that the linker discarded.
 """
+# pylint: disable=invalid-name
 # Copyright (c) 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
