@@ -126,6 +126,7 @@ DWARF_RANGES_RE = re.compile(r"DW_AT_ranges\b")
 NM_LINE_RE = re.compile(
     r"^(?:[0-9A-Fa-f]+\s+)?(?P<type>[A-Za-z])\s+(?P<name>\S+)$"
 )
+NM_BATCH_SIZE = 64
 
 
 def extract_functions(
@@ -266,6 +267,36 @@ def iter_object_files(root: str) -> Iterable[str]:
                 yield os.path.join(base, filename)
 
 
+def iter_batches(items: Iterable[str], size: int) -> Iterable[List[str]]:
+    """Yield lists of up to `size` items from one iterable."""
+    batch: List[str] = []
+    for item in items:
+        batch.append(item)
+        if len(batch) == size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def iter_nm_symbols(output: str) -> Iterable[Tuple[str, str, str]]:
+    """Yield `(object_path, symbol_type, symbol_name)` from `nm -A` output."""
+    for line in output.splitlines():
+        if ":" not in line:
+            continue
+
+        obj_path, record = line.split(":", 1)
+        match = NM_LINE_RE.match(record.strip())
+        if not match:
+            continue
+
+        yield (
+            normalize_object_path(obj_path),
+            match.group("type"),
+            match.group("name"),
+        )
+
+
 def build_symbol_indexes(
     root: str,
     interesting_names: Set[str],
@@ -280,36 +311,39 @@ def build_symbol_indexes(
     # - `all_leaf[name] -> {object_path, ...}` for all leaf objects
     gcno_backed: SymbolIndex = defaultdict(set)
     all_leaf: SymbolIndex = defaultdict(set)
-    for obj_path in iter_object_files(root):
-        rel_path = normalize_object_path(obj_path)
-        has_gcno = object_has_matching_gcno(rel_path)
+
+    object_paths = list(iter_object_files(root))
+    has_gcno_by_object = {
+        normalize_object_path(obj_path): object_has_matching_gcno(
+            normalize_object_path(obj_path)
+        )
+        for obj_path in object_paths
+    }
+    seen_by_object: DefaultDict[str, Set[str]] = defaultdict(set)
+
+    for batch in iter_batches(object_paths, NM_BATCH_SIZE):
         try:
             output = subprocess.check_output(
-                ["nm", "--defined-only", obj_path],
+                ["nm", "-A", "--defined-only", *batch],
                 text=True,
                 errors="replace",
                 stderr=subprocess.DEVNULL,
             )
         except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-            raise RuntimeError(f"nm failed for {obj_path}") from exc
-        seen_in_object: Set[str] = set()
-        for line in output.splitlines():
-            match = NM_LINE_RE.match(line.strip())
-            if not match:
-                continue
+            raise RuntimeError(f"nm failed for batch starting with {batch[0]}") from exc
 
-            symbol_type = match.group("type")
+        for rel_path, symbol_type, symbol_name in iter_nm_symbols(output):
             if symbol_type not in {"T", "t", "W", "w"}:
                 continue
 
-            name = normalize_name(match.group("name"), normalize_clones)
-            if name not in interesting_names or name in seen_in_object:
+            name = normalize_name(symbol_name, normalize_clones)
+            if name not in interesting_names or name in seen_by_object[rel_path]:
                 continue
 
             all_leaf[name].add(rel_path)
-            if has_gcno:
+            if has_gcno_by_object.get(rel_path, False):
                 gcno_backed[name].add(rel_path)
-            seen_in_object.add(name)
+            seen_by_object[rel_path].add(name)
     return gcno_backed, all_leaf
 
 
