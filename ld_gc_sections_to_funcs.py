@@ -266,32 +266,23 @@ def iter_object_files(root: str) -> Iterable[str]:
                 yield os.path.join(base, filename)
 
 
-def build_symbol_index(
+def build_symbol_indexes(
     root: str,
     interesting_names: Set[str],
     normalize_clones: bool,
-    require_gcno: bool,
-) -> SymbolIndex:
-    """Build `function -> leaf objects` for names relevant to this run."""
+) -> Tuple[SymbolIndex, SymbolIndex]:
+    """Build gcno-backed and all-leaf `function -> objects` indexes in one pass."""
     # Index leaf object definitions for the names we care about so aggregate
     # linker removals like `prelink.o:foo` can be mapped back to `bar.o:foo`.
     #
-    # Args:
-    # - root: build-tree root to scan recursively for leaf object files.
-    # - interesting_names: only these symbol names are indexed to keep the `nm`
-    #   scan bounded to names that actually matter for the current run.
-    # - normalize_clones: whether clone suffixes should be collapsed while
-    #   indexing names from `nm`.
-    #
     # Returns:
-    # - `function_name -> {object_path, ...}` for leaf objects that appear to
-    #   define the function. By default only objects with matching gcno files
-    #   are indexed, but callers can also ask for all leaf objects.
-    by_name: SymbolIndex = defaultdict(set)
+    # - `gcno_backed[name] -> {object_path, ...}` for leaf objects with gcno
+    # - `all_leaf[name] -> {object_path, ...}` for all leaf objects
+    gcno_backed: SymbolIndex = defaultdict(set)
+    all_leaf: SymbolIndex = defaultdict(set)
     for obj_path in iter_object_files(root):
         rel_path = normalize_object_path(obj_path)
-        if require_gcno and not object_has_matching_gcno(rel_path):
-            continue
+        has_gcno = object_has_matching_gcno(rel_path)
         try:
             output = subprocess.check_output(
                 ["nm", "-a", obj_path],
@@ -315,27 +306,11 @@ def build_symbol_index(
             if name not in interesting_names or name in seen_in_object:
                 continue
 
-            by_name[name].add(rel_path)
+            all_leaf[name].add(rel_path)
+            if has_gcno:
+                gcno_backed[name].add(rel_path)
             seen_in_object.add(name)
-    return by_name
-
-
-def build_gcno_symbol_index(
-    root: str,
-    interesting_names: Set[str],
-    normalize_clones: bool,
-) -> SymbolIndex:
-    """Build `function -> leaf objects` for objects that own gcno files."""
-    return build_symbol_index(root, interesting_names, normalize_clones, True)
-
-
-def build_leaf_symbol_index(
-    root: str,
-    interesting_names: Set[str],
-    normalize_clones: bool,
-) -> SymbolIndex:
-    """Build `function -> leaf objects` for all leaf objects under the tree."""
-    return build_symbol_index(root, interesting_names, normalize_clones, False)
+    return gcno_backed, all_leaf
 
 
 def build_removed_object_set(removed_entries: List[FuncKey]) -> Set[str]:
@@ -398,12 +373,7 @@ class RemovalResolver:
         """Build the indexes needed to scope removals to leaf objects."""
         dwarf_state = dwarf_state or DwarfResolutionState(set(), set())
         self.strict = strict
-        self.gcno_symbol_index = build_gcno_symbol_index(
-            os.getcwd(),
-            {name for name, _ in removed_entries},
-            normalize_clones,
-        )
-        self.leaf_symbol_index = build_leaf_symbol_index(
+        self.gcno_symbol_index, self.leaf_symbol_index = build_symbol_indexes(
             os.getcwd(),
             {name for name, _ in removed_entries},
             normalize_clones,
