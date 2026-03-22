@@ -285,7 +285,7 @@ def build_symbol_indexes(
         has_gcno = object_has_matching_gcno(rel_path)
         try:
             output = subprocess.check_output(
-                ["nm", "-a", obj_path],
+                ["nm", "--defined-only", obj_path],
                 text=True,
                 errors="replace",
                 stderr=subprocess.DEVNULL,
