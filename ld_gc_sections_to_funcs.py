@@ -220,11 +220,6 @@ def object_has_matching_gcno(path: str) -> bool:
     return any(os.path.exists(candidate) for candidate in object_gcno_candidates(path))
 
 
-def is_object_path(path: str) -> bool:
-    """Return true when one DWARF input path is a leaf object file."""
-    return path.endswith(".o")
-
-
 def object_from_source_path(source_name: str, comp_dir: Optional[str]) -> Optional[str]:
     """Map a DWARF compile-unit source path back to a likely leaf object."""
     # DWARF compile units identify source files, not object files. In normal C
@@ -928,7 +923,7 @@ def parse_dwarf_data(
     for path in paths:
         file_inlined, file_defined = scanner.scan_one(path)
         defined.update(file_defined)
-        if not is_object_path(path):
+        if not path.endswith(".o"):
             final_defined.update(file_defined)
 
         for callee, callers in file_inlined.items():

@@ -252,18 +252,18 @@ def handle_function_record(
         return False
 
     name = parse_function_name(payload)
-    state["skip_current"] = name in remove_functions if name else False
+    state["skip_current"] = name in remove_functions
     if not state["skip_current"]:
         state["current_removed_lines"] = None
         return False
 
-    state["removed"] = int(state["removed"]) + 1
+    state["removed"] += + 1
 
     if name:
         state["removed_names"].append(name)
 
     if list_lines:
-        label = name if name else "<unknown>"
+        label = name or "<unknown>"
         state["current_removed_lines"] = {}
         state["removed_lines"].append((label, state["current_removed_lines"]))
     return True
@@ -439,7 +439,7 @@ def main(argv: List[str]) -> int:
                 functions_by_object,
             )
         except ValueError as exc:
-            print(f"Skipping {path}: {exc}", file=sys.stderr)
+            print(f"warning: skipping {path}: {exc}", file=sys.stderr)
             continue
 
         if removed:
