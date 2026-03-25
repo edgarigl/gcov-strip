@@ -56,20 +56,18 @@ def load_function_list(
     return functions_by_object
 
 
-def gcno_object_keys(path: str) -> Set[str]:
-    """Return object-path keys that may correspond to one gcno file."""
-    # Derive the object names that may correspond to this gcno file. Relative
-    # paths are preferred so generated configs remain stable across workspaces.
+def gcno_object_paths(path: str) -> Set[str]:
+    """Return object paths that may correspond to one gcno file."""
     abs_gcno = os.path.abspath(path)
     rel_gcno = os.path.relpath(abs_gcno, os.getcwd())
-    keys = set()
+    paths = set()
     for gcno_path in (abs_gcno, rel_gcno, os.path.basename(rel_gcno)):
         if gcno_path.endswith(".gcno"):
             # Try a few path spellings because linker logs and generated config
             # files may record the same object as an absolute path, a cwd-
             # relative path, or just a basename.
-            keys.add(os.path.normpath(gcno_path[:-5] + ".o"))
-    return keys
+            paths.add(os.path.normpath(gcno_path[:-5] + ".o"))
+    return paths
 
 
 def removal_set_for_gcno(
@@ -79,7 +77,7 @@ def removal_set_for_gcno(
     """Build the removal set that applies to one gcno file."""
     # Only object-qualified removals are active.
     matched = set()
-    for key in gcno_object_keys(path):
+    for key in gcno_object_paths(path):
         matched.update(functions_by_object.get(key, set()))
     return matched
 

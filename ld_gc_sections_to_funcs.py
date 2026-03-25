@@ -157,22 +157,34 @@ def extract_functions(
             continue
 
         section, obj_path = match.groups()
-        text_index = section.rfind(".text.")
-        if text_index == -1:
+        name = parse_text_section_name(section, normalize_clones)
+        if name is None:
             continue
-
-        name = section[text_index + len(".text.") :]
-        if normalize_clones:
-            # GCC may emit clone-specific suffixes that should map back to the
-            # original function name when matching against gcov notes.
-            clone_match = CLONE_RE.match(name)
-            if clone_match:
-                name = clone_match.group("base")
         entry = (name, normalize_object_path(obj_path))
         if entry not in seen:
             seen.add(entry)
             functions.append(entry)
     return functions
+
+
+def parse_text_section_name(
+    section: str,
+    normalize_clones: bool,
+) -> Optional[str]:
+    """Parse `.text` section names conservatively into function names."""
+    if not section.startswith(".text."):
+        return None
+
+    suffix = section[len(".text.") :]
+    parts = suffix.split(".")
+    if len(parts) == 1:
+        name = parts[0]
+    elif len(parts) == 2:
+        _, name = parts
+    else:
+        return None
+
+    return normalize_name(name, normalize_clones)
 
 
 def normalize_object_path(path: str) -> str:
