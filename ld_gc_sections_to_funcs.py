@@ -16,7 +16,7 @@
 # The DWARF approach is intentionally conservative. It does not try to rebuild
 # full linker provenance. Instead it asks a narrower question:
 # - which inlined callees are described only as inline expansions in DWARF?
-# - which out-of-line callers contain those inline expansions?
+# - which callers contain those inline expansions?
 # - can both sides be mapped back to a concrete leaf object with a gcno file?
 # If the callee has no concrete code range of its own and every observed caller
 # was already removed by the linker, the callee becomes a candidate for gcno
@@ -33,6 +33,7 @@ import subprocess
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
+from itertools import batched
 from typing import DefaultDict, Dict, Iterable, List, NamedTuple, Optional, Set, Tuple
 
 FuncKey = Tuple[str, Optional[str]]
@@ -274,18 +275,6 @@ def iter_object_files(root: str) -> Iterable[str]:
                 yield os.path.join(base, filename)
 
 
-def iter_batches(items: Iterable[str], size: int) -> Iterable[List[str]]:
-    """Yield lists of up to `size` items from one iterable."""
-    batch: List[str] = []
-    for item in items:
-        batch.append(item)
-        if len(batch) == size:
-            yield batch
-            batch = []
-    if batch:
-        yield batch
-
-
 def iter_nm_symbols(output: str) -> Iterable[Tuple[str, str, str]]:
     """Yield `(object_path, symbol_type, symbol_name)` from `nm -A` output."""
     for line in output.splitlines():
@@ -328,7 +317,7 @@ def build_symbol_indexes(
     }
     seen_by_object: DefaultDict[str, Set[str]] = defaultdict(set)
 
-    for batch in iter_batches(object_paths, NM_BATCH_SIZE):
+    for batch in batched(object_paths, NM_BATCH_SIZE):
         try:
             output = subprocess.check_output(
                 ["nm", "-A", "--defined-only", *batch],
