@@ -28,7 +28,6 @@ GCOV_HEADER_SIZE = 16
 
 def parse_config_entry(line: str) -> Tuple[str, str]:
     """Parse one config line into `(object_path, function)`."""
-    # Config entries are always `object:function`.
     if ":" not in line:
         raise ValueError(f"invalid config entry {line!r}: expected object:function")
     obj_path, function = line.rsplit(":", 1)
@@ -41,7 +40,6 @@ def load_function_list(
     path: str,
 ) -> DefaultDict[str, Set[str]]:
     """Load one removal config file."""
-    # Read one object-qualified config file of removals.
     functions_by_object: DefaultDict[str, Set[str]] = defaultdict(set)
     with open(path, "r", encoding="utf-8") as handle:
         for line in handle:
@@ -74,8 +72,7 @@ def removal_set_for_gcno(
     path: str,
     functions_by_object: DefaultDict[str, Set[str]],
 ) -> Set[str]:
-    """Build the removal set that applies to one gcno file."""
-    # Only object-qualified removals are active.
+    """Build the object-qualified removal set that applies to one gcno file."""
     matched = set()
     for key in gcno_object_paths(path):
         matched.update(functions_by_object.get(key, set()))
@@ -84,8 +81,6 @@ def removal_set_for_gcno(
 
 def record_start_offset(data: bytes) -> int:
     """Return the byte offset where per-function gcno records begin."""
-    # Skip the gcno file header and the compile-unit record that precedes the
-    # per-function records we want to filter.
     offset = GCOV_HEADER_SIZE
     if offset + 4 > len(data):
         raise ValueError("missing unit record")
@@ -102,8 +97,6 @@ def record_start_offset(data: bytes) -> int:
 
 def iter_gcno_records(data: bytes, start_offset: int) -> Iterable[Tuple[int, bytes]]:
     """Yield `(tag, payload)` pairs for gcno records starting at `start_offset`."""
-    # Yield each gcno record as `(tag, payload)` from the first function record
-    # onward. The payload length is stored in the record header.
     offset = start_offset
     while offset < len(data):
         if offset + 8 > len(data):
@@ -121,8 +114,6 @@ def iter_gcno_records(data: bytes, start_offset: int) -> Iterable[Tuple[int, byt
 
 def read_gcov_string(payload: bytes, offset: int) -> Tuple[Optional[str], int]:
     """Decode one gcov string field and return `(value, new_offset)`."""
-    # Decode a gcov string field and return the updated byte offset so callers
-    # can continue parsing the surrounding record.
     if offset + 4 > len(payload):
         return None, offset
     (length,) = struct.unpack_from("<I", payload, offset)
@@ -141,8 +132,6 @@ def read_gcov_string(payload: bytes, offset: int) -> Tuple[Optional[str], int]:
 
 def parse_function_name(payload: bytes) -> Optional[str]:
     """Extract a function name from a `GCOV_TAG_FUNCTION` payload."""
-    # Extract the function name from a `GCOV_TAG_FUNCTION` payload. The first
-    # 12 bytes hold numeric metadata before the gcov string.
     if len(payload) < 12:
         return None
     offset = 12
@@ -154,8 +143,6 @@ def parse_function_name(payload: bytes) -> Optional[str]:
 
 def parse_line_record(payload: bytes) -> Dict[str, Set[int]]:
     """Parse one `GCOV_TAG_LINES` payload into `file -> line numbers`."""
-    # Parse a `GCOV_TAG_LINES` payload into `file -> line numbers` so `--list-lines`
-    # can report which source lines were removed along with a function.
     if len(payload) < 4:
         return {}
     offset = 0
@@ -192,9 +179,6 @@ def rebuild_gcno(
     list_lines: bool = False,
 ) -> Tuple[bytes, int, List[str], List[Tuple[str, Dict[str, Set[int]]]]]:
     """Rewrite one gcno file in memory with selected functions removed."""
-    # Rebuild a gcno file in memory, omitting any function record whose name is
-    # in `remove_functions` and any trailing records that belong to that
-    # function. Optionally collect line info for removed functions.
     if len(data) < GCOV_HEADER_SIZE:
         raise ValueError("missing gcno header")
 
@@ -269,7 +253,6 @@ def handle_function_record(
 
 def find_gcno_files(root: str) -> Iterable[str]:
     """Yield gcno files recursively under `root`."""
-    # Discover gcno files recursively under the chosen root.
     for base, _, files in os.walk(root):
         for filename in files:
             if filename.endswith(".gcno"):
@@ -280,7 +263,6 @@ def process_file(
     path: str, remove_functions: Set[str], list_lines: bool = False
 ) -> Tuple[bool, int, List[str], List[Tuple[str, Dict[str, Set[int]]]]]:
     """Rewrite one gcno file in place if any selected functions are removed."""
-    # Rewrite a single gcno file in place if any records are removed.
     with open(path, "rb") as handle:
         data = handle.read()
 
@@ -297,8 +279,6 @@ def process_file(
 
 def resolve_source_path(gcno_path: str, source_name: str) -> str:
     """Best-effort source path resolution for gcno line-table filenames."""
-    # Best-effort resolution for file names stored in gcno line tables. They
-    # may be absolute, relative to the object directory, or relative to cwd.
     if os.path.isabs(source_name):
         return source_name
     base_dir = os.path.dirname(gcno_path)
@@ -315,8 +295,6 @@ def print_removed_lines(
     gcno_path: str, removed_lines: List[Tuple[str, Dict[str, Set[int]]]]
 ) -> None:
     """Print the source lines associated with removed functions."""
-    # Print the source lines associated with removed functions to make the
-    # effect of stripping easier to inspect during local runs.
     for function_name, lines_by_file in removed_lines:
         if not lines_by_file:
             continue
@@ -334,8 +312,6 @@ def print_removed_lines(
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
     """Parse command-line arguments."""
-    # Keep the CLI narrow: object-qualified config files define removals, and
-    # flags only control reporting versus in-place rewriting.
     parser = argparse.ArgumentParser(
         description=(
             "Remove selected function records from .gcno files found "
@@ -420,8 +396,6 @@ def handle_gcno_file(
 
 def main(argv: List[str]) -> int:
     """Load configs, rewrite matching gcno files, and print a short summary."""
-    # Load the removal set once, then apply it to every gcno file beneath the
-    # current working directory.
     args = parse_args(argv)
     functions_by_object = load_removals(args.config)
     if not functions_by_object:

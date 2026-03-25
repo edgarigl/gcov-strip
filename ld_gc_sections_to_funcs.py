@@ -136,17 +136,6 @@ def extract_functions(
     echo_stderr: bool,
 ) -> List[FuncKey]:
     """Extract unique `(function, object)` removals from linker output."""
-    # Pull unique `(function, object)` pairs from linker diagnostics such as:
-    #   removing unused section '.text.foo' in file 'foo.o'
-    #
-    # Args:
-    # - lines: linker output lines, usually stderr from the final link step.
-    # - normalize_clones: collapse GCC clone suffixes back to the base function
-    #   name so linker removals can be matched against gcov and DWARF names.
-    # - echo_stderr: reprint the input line to stderr while parsing.
-    #
-    # Returns:
-    # - a stable-order list of unique `(function_name, object_path)` tuples.
     functions: List[FuncKey] = []
     seen: Set[FuncKey] = set()
     for line in lines:
@@ -190,8 +179,6 @@ def parse_text_section_name(
 
 def normalize_object_path(path: str) -> str:
     """Normalize an object path into a stable key for gcno matching."""
-    # Normalize object paths so linker, DWARF, and filesystem paths compare as
-    # the same object.
     normalized = os.path.normpath(path)
     if os.path.isabs(normalized):
         try:
@@ -203,15 +190,6 @@ def normalize_object_path(path: str) -> str:
 
 def object_gcno_candidates(path: str) -> Set[str]:
     """Return gcno path candidates for one object path."""
-    # Linker diagnostics may report object paths in a few different forms. Try
-    # the same path spellings when looking for the gcno file that would be
-    # rewritten for an object-qualified removal.
-    #
-    # Args:
-    # - path: an object path from linker output or DWARF-derived provenance.
-    #
-    # Returns:
-    # - possible `.gcno` paths that might correspond to that object.
     normalized = normalize_object_path(path)
     candidates = {normalized}
     if not os.path.isabs(normalized):
@@ -226,28 +204,11 @@ def object_gcno_candidates(path: str) -> Set[str]:
 
 def object_has_matching_gcno(path: str) -> bool:
     """Return true when an object path appears to own a gcno file."""
-    # Treat an object as directly scopeable only when it has a corresponding
-    # gcno file. Intermediate link artifacts often do not, which means they
-    # need to be resolved back to leaf objects before we can safely scope a
-    # removal to a specific gcno.
     return any(os.path.exists(candidate) for candidate in object_gcno_candidates(path))
 
 
 def object_from_source_path(source_name: str, comp_dir: Optional[str]) -> Optional[str]:
     """Map a DWARF compile-unit source path back to a likely leaf object."""
-    # DWARF compile units identify source files, not object files. In normal C
-    # builds the object and gcno live next to the source path inside the build
-    # tree, so try the obvious `.c -> .o` style translations and keep the first
-    # one that actually has a matching gcno.
-    #
-    # Args:
-    # - source_name: compile-unit source path from `DW_AT_name`.
-    # - comp_dir: compile-unit working directory from `DW_AT_comp_dir`, or
-    #   `None` when DWARF does not provide it.
-    #
-    # Returns:
-    # - the first object path that appears to own the corresponding gcno, or
-    #   `None` when the source file cannot be mapped back to a leaf object.
     candidates: List[str] = []
     if os.path.isabs(source_name):
         candidates.append(source_name)
@@ -299,12 +260,6 @@ def build_symbol_indexes(
     normalize_clones: bool,
 ) -> Tuple[SymbolIndex, SymbolIndex]:
     """Build gcno-backed and all-leaf `function -> objects` indexes in one pass."""
-    # Index leaf object definitions for the names we care about so aggregate
-    # linker removals like `prelink.o:foo` can be mapped back to `bar.o:foo`.
-    #
-    # Returns:
-    # - `gcno_backed[name] -> {object_path, ...}` for leaf objects with gcno
-    # - `all_leaf[name] -> {object_path, ...}` for all leaf objects
     gcno_backed: SymbolIndex = defaultdict(set)
     all_leaf: SymbolIndex = defaultdict(set)
 
@@ -536,8 +491,6 @@ def resolve_removed_entries(
     dwarf_state: Optional[DwarfResolutionState] = None,
 ) -> Tuple[List[str], List[str], List[str]]:
     """Turn removed entries into active config lines and review notes."""
-    # Resolve linker removals into config lines.
-    #
     # Resolution order:
     # 1. If the linker-reported object has its own gcno, emit it directly as
     #    `object:function`.
@@ -550,23 +503,6 @@ def resolve_removed_entries(
     # 6. If resolution is still not unique, emit a `# REVIEW ...` block or fail
     #    in strict mode.
     #
-    # Args:
-    # - removed_entries: linker- or DWARF-derived `(function, object_hint)`
-    #   tuples. `object_hint` may be `None` or may point at an intermediate
-    #   object that does not own a gcno directly.
-    # - normalize_clones: whether clone suffixes should be normalized while
-    #   building the leaf-object symbol index.
-    # - strict: if true, unresolved or ambiguous mappings raise an error instead
-    #   of being emitted as commented review entries.
-    # - dwarf_state: surviving DWARF state from non-`.o` inputs. The
-    #   final-defined functions help identify which same-name leaf object
-    #   survived in the linked image; the assembler-defined names keep
-    #   assembler DWARF from blocking the likely no-coverage classification.
-    #
-    # Returns:
-    # - active config lines safe for `gcov-strip`
-    # - warning messages describing ambiguous or unresolved cases
-    # - commented review lines to append to the generated config
     resolver = RemovalResolver(
         removed_entries,
         normalize_clones,
@@ -601,8 +537,6 @@ def resolve_removed_entries(
 
 def normalize_name(name: str, normalize_clones: bool) -> str:
     """Normalize a name so linker, DWARF, and gcov forms line up."""
-    # Normalize names from DWARF/readelf output so they can be compared against
-    # linker-derived names and gcov function records.
     name = name.rstrip(".,")
     name = re.sub(r"/\d+$", "", name)
     if normalize_clones:
@@ -622,8 +556,6 @@ def parse_object_scoped_entry(line: str) -> FuncKey:
 
 def iter_readelf(args: List[str]) -> Iterable[str]:
     """Stream `readelf` output line by line."""
-    # Stream readelf output line-by-line so large DWARF dumps do not need to be
-    # buffered in memory at once.
     try:
         with subprocess.Popen(
             args,
@@ -645,8 +577,6 @@ def iter_readelf(args: List[str]) -> Iterable[str]:
 
 def clean_dwarf_value(value: str) -> str:
     """Strip readelf formatting wrappers from one attribute value."""
-    # readelf often prefixes attribute values with formatting metadata. Strip
-    # that wrapper and keep just the human-readable symbol name.
     value = value.strip()
     if "):" in value:
         value = value.split("):")[-1].strip()
@@ -942,19 +872,10 @@ def find_inline_only_functions(
     inline_info: Dict[FuncKey, Set[FuncKey]],
     defined_functions: Set[FuncKey],
 ) -> Set[FuncKey]:
-    """Infer safe inline-only removals from linker removals plus DWARF data."""
-    # Infer extra removals for callees that only survive as inlined DWARF
-    # entries and whose every caller is already known to be discarded.
-    #
-    # Args:
-    # - remove_functions: already-confirmed removed functions, including object
-    #   scope when known.
-    # - inline_info: inline callee -> callers map from `parse_dwarf_data()`.
-    # - defined_functions: functions that still have concrete code ranges in
-    #   DWARF and therefore should not be treated as inline-only.
-    #
-    # Returns:
-    # - additional scoped removals that are safe to infer from DWARF alone.
+    """
+    Infer extra scoped removals for callees that survive only as inlined DWARF
+    entries and whose every caller is already known to be discarded.
+    """
     extra: Set[FuncKey] = set()
     for callee, callers in inline_info.items():
         if not callers or callee in remove_functions:
@@ -1024,11 +945,10 @@ def resolve_inline_only_removals(
     inlined: Dict[FuncKey, Set[FuncKey]],
     defined: Set[FuncKey],
 ) -> Tuple[List[str], List[str], List[str]]:
-    """Infer inline-only removals from DWARF and scope them to safe config lines."""
-    # Start from the already-resolved linker removals, then ask DWARF for
-    # extra callees that only survive as inline expansions. Any such callee
-    # still has to go through the normal object-resolution path before it
-    # becomes an active `object:function` config entry.
+    """
+    Infer inline-only removals from DWARF and pass them through the normal
+    object-resolution path before they become active `object:function` lines.
+    """
     if not inlined and not defined:
         return [], [], []
 
