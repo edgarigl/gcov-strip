@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include "c.h"
 
 static inline void local_inline_bar(void)
 {
@@ -14,5 +15,7 @@ void bar(void)
 {
     local_bar();
     local_inline_bar();
+
+    func_c(0);
     puts(__func__);
 }

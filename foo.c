@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include "c.h"
 
 static void local_foo(void)
 {
@@ -8,5 +9,6 @@ static void local_foo(void)
 void foo(void)
 {
     local_foo();
+    func_c(1);
     puts(__func__);
 }

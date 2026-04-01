@@ -9,6 +9,7 @@ CFLAGS += -ffunction-sections
 CFLAGS += -fprofile-arcs -ftest-coverage
 #CFLAGS += -fkeep-static-functions
 #CFLAGS += -fkeep-inline-functions
+#CFLAGS += -fno-inline
 LDFLAGS += -coverage
 LDFLAGS += -Wl,--gc-sections -Wl,--print-gc-sections
 TARGET = ctest
@@ -33,3 +34,4 @@ clean:
 	$(RM) -r dumps
 	$(RM) funcs-removed.cfg
 	$(RM) $(OBJS) $(TARGET)
+	$(RM) *.gcda *.gcno *.gcov coverage*.html
