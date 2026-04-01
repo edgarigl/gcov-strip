@@ -5,8 +5,8 @@ Remove selected function records from `.gcno` coverage notes files.
 The tool walks `.gcno` files under the current directory, parses the note
 records, and drops any function record whose name appears in one of the input
 config files. When a function is removed, the following records that belong to
-that function are also skipped so gcov/gcovr no longer report coverage for
-code that the linker discarded.
+that function are also skipped so coverage reports no longer report coverage
+for code that the linker discarded.
 """
 # pylint: disable=invalid-name
 # Copyright (c) 2026 Advanced Micro Devices, Inc.
