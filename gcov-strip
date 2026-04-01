@@ -23,7 +23,9 @@ from typing import DefaultDict, Dict, Iterable, List, Optional, Set, Tuple
 
 GCOV_TAG_FUNCTION = 0x01000000
 GCOV_TAG_LINES = 0x01450000
+GCNO_OLD_HEADER_SIZE = 12
 GCOV_HEADER_SIZE = 16
+GCOV_FUNCTION_METADATA_SIZE = 12
 GCNO_MAGIC_LE = b"oncg"
 SUPPORTED_GCNO_VERSIONS = {
     b"*59A",
@@ -135,7 +137,7 @@ def select_gcno_layout(data: bytes) -> bool:
 
 def record_start_offset(data: bytes, use_word_counts: bool) -> int:
     """Return the byte offset where per-function gcno records begin."""
-    offset = 12 if use_word_counts else GCOV_HEADER_SIZE
+    offset = GCNO_OLD_HEADER_SIZE if use_word_counts else GCOV_HEADER_SIZE
     if offset + 4 > len(data):
         raise ValueError("missing cwd record")
     (length,) = struct.unpack_from("<I", data, offset)
@@ -197,9 +199,9 @@ def read_gcov_string(
 
 def parse_function_name(payload: bytes, use_word_counts: bool) -> Optional[str]:
     """Extract a function name from a `GCOV_TAG_FUNCTION` payload."""
-    if len(payload) < 12:
+    if len(payload) < GCOV_FUNCTION_METADATA_SIZE:
         return None
-    offset = 12
+    offset = GCOV_FUNCTION_METADATA_SIZE
     name, offset = read_gcov_string(payload, offset, use_word_counts)
     return name
 
