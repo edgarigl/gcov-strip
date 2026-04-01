@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Convert linker `--print-gc-sections` output into removals for gcov-strip."""
-# pylint: disable=too-many-lines
+# pylint: disable=invalid-name,too-many-lines
 #
 # Convert linker `--print-gc-sections` output into a list of function names
 # whose coverage notes should be removed from `.gcno` files.
@@ -191,14 +191,17 @@ def normalize_object_path(path: str) -> str:
 def object_gcno_candidates(path: str) -> Set[str]:
     """Return gcno path candidates for one object path."""
     normalized = normalize_object_path(path)
+    if not normalized.endswith(".o"):
+        raise ValueError(f"expected .o path, got {path!r}")
+
     candidates = {normalized}
     if not os.path.isabs(normalized):
         candidates.add(os.path.abspath(normalized))
         candidates.add(os.path.basename(normalized))
+
     gcno_candidates: Set[str] = set()
     for candidate in candidates:
-        if candidate.endswith(".o"):
-            gcno_candidates.add(os.path.splitext(candidate)[0] + ".gcno")
+        gcno_candidates.add(os.path.splitext(candidate)[0] + ".gcno")
     return gcno_candidates
 
 
