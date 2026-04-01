@@ -251,7 +251,7 @@ def rebuild_gcno(
     output.extend(data[:prefix_end])
 
     state = {
-        "skip_current": False,
+        "drop_current": False,
         "removed": 0,
         "removed_names": [],
         "removed_lines": [],
@@ -269,7 +269,7 @@ def rebuild_gcno(
         ):
             continue
 
-        if state["skip_current"] and list_lines and tag == GCOV_TAG_LINES:
+        if state["drop_current"] and list_lines and tag == GCOV_TAG_LINES:
             # Line records arrive after the owning function record, so collect
             # them before dropping the bytes from the rebuilt output.
             if state["current_removed_lines"] is not None:
@@ -278,7 +278,7 @@ def rebuild_gcno(
                     state["current_removed_lines"].setdefault(filename, set()).update(lines)
             continue
 
-        if state["skip_current"]:
+        if state["drop_current"]:
             # Skip all record types until the next function record starts.
             continue
 
@@ -305,8 +305,8 @@ def handle_function_record(
         return False
 
     name = parse_function_name(payload, bool(state["use_word_counts"]))
-    state["skip_current"] = name in remove_functions
-    if not state["skip_current"]:
+    state["drop_current"] = name in remove_functions
+    if not state["drop_current"]:
         state["current_removed_lines"] = None
         return False
 
