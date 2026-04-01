@@ -1,6 +1,6 @@
 #CROSS=$(HOME)/dev/bin/microblazeel-xilinx-elf-
-CC=$(CROSS)gcc
-GCOV=gcov
+CC ?= $(CROSS)gcc
+GCOV ?= gcov
 GCOVR=gcovr --gcov-executable $(GCOV)
 
 CFLAGS = -Wall -O2 -g
