@@ -82,17 +82,6 @@ def gcno_object_paths(path: str) -> Set[str]:
     return paths
 
 
-def removal_set_for_gcno(
-    path: str,
-    functions_by_object: DefaultDict[str, Set[str]],
-) -> Set[str]:
-    """Build the object-qualified removal set that applies to one gcno file."""
-    matched = set()
-    for key in gcno_object_paths(path):
-        matched.update(functions_by_object.get(key, set()))
-    return matched
-
-
 def format_gcov_version(version: bytes) -> str:
     """Format one raw gcov version field as its usual human-readable string."""
     return version.decode("ascii", errors="replace")[::-1]
@@ -450,10 +439,10 @@ def handle_gcno_file(
     if not path.endswith(".gcno"):
         raise ValueError(f"expected .gcno file, got {path!r}")
 
-    remove_for_file = removal_set_for_gcno(
-        path,
-        functions_by_object,
-    )
+    remove_for_file = set()
+    for obj_path in gcno_object_paths(path):
+        remove_for_file.update(functions_by_object.get(obj_path, set()))
+
     if not remove_for_file:
         # Skip unrelated gcno files entirely; removals are always object-scoped.
         return 0, 0
