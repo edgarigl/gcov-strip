@@ -553,8 +553,9 @@ def parse_object_scoped_entry(line: str) -> FuncKey:
     return function, normalize_object_path(obj_path)
 
 
-def iter_readelf(args: List[str]) -> Iterable[str]:
-    """Stream `readelf` output line by line."""
+def iter_readelf(path: str) -> Iterable[str]:
+    """Stream `readelf --debug-dump=info --wide` output for one path."""
+    args = ["readelf", "--debug-dump=info", "--wide", path]
     try:
         with subprocess.Popen(
             args,
@@ -662,7 +663,7 @@ class DwarfScanner:
         current_cu_offset: Optional[int] = None
         dwarf_object_hint = normalize_object_path(path) if path.endswith(".o") else None
 
-        for line in iter_readelf(["readelf", "--debug-dump=info", "--wide", path]):
+        for line in iter_readelf(path):
             header = DIE_RE.match(line)
             if header:
                 current_offset, current_cu_offset = self.start_die(
