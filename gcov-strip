@@ -407,18 +407,6 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def load_removals(
-    config_paths: List[str],
-) -> DefaultDict[str, Set[str]]:
-    """Load all config files into one object-qualified removal map."""
-    functions_by_object: DefaultDict[str, Set[str]] = defaultdict(set)
-    for path in config_paths:
-        object_functions = load_config(path)
-        for obj_path, names in object_functions.items():
-            functions_by_object[obj_path].update(names)
-    return functions_by_object
-
-
 def handle_gcno_file(
     path: str,
     args: argparse.Namespace,
@@ -462,7 +450,12 @@ def handle_gcno_file(
 def main(argv: List[str]) -> int:
     """Load configs, rewrite matching gcno files, and print a short summary."""
     args = parse_args(argv)
-    functions_by_object = load_removals(args.config)
+    functions_by_object: DefaultDict[str, Set[str]] = defaultdict(set)
+    for path in args.config:
+        object_functions = load_config(path)
+        for obj_path, names in object_functions.items():
+            functions_by_object[obj_path].update(names)
+
     if not functions_by_object:
         return 0
 
