@@ -978,7 +978,11 @@ def write_output(
 ) -> None:
     """Write or print the generated config lines."""
     if output_path:
-        handle = open(output_path, "w", encoding="utf-8")
+        handle = open(  # pylint: disable=consider-using-with
+            output_path,
+            "w",
+            encoding="utf-8",
+        )
     else:
         handle = sys.stdout
 
