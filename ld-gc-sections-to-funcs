@@ -203,7 +203,6 @@ def matching_gcno_path(path: str) -> Optional[str]:
     candidates = {normalized}
     if not os.path.isabs(normalized):
         candidates.add(os.path.abspath(normalized))
-        candidates.add(os.path.basename(normalized))
 
     for candidate in candidates:
         gcno_path = os.path.splitext(candidate)[0] + ".gcno"
