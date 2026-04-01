@@ -175,6 +175,13 @@ def iter_gcno_records(
         yield tag, payload
 
 
+def encode_record_length(payload: bytes, use_word_counts: bool) -> int:
+    """Return the on-disk record length field for one payload."""
+    if use_word_counts:
+        return len(payload) // 4
+    return len(payload)
+
+
 def read_gcov_string(
     payload: bytes,
     offset: int,
@@ -269,7 +276,9 @@ def rebuild_gcno(
             state["drop_current"] = name in remove_functions
             if not state["drop_current"]:
                 state["current_removed_lines"] = None
-                output.extend(struct.pack("<II", tag, len(payload)))
+                output.extend(
+                    struct.pack("<II", tag, encode_record_length(payload, use_word_counts))
+                )
                 output.extend(payload)
                 continue
 
@@ -295,7 +304,9 @@ def rebuild_gcno(
             # Skip all record types until the next function record starts.
             continue
 
-        output.extend(struct.pack("<II", tag, len(payload)))
+        output.extend(
+            struct.pack("<II", tag, encode_record_length(payload, use_word_counts))
+        )
         output.extend(payload)
 
     return (
