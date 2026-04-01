@@ -350,12 +350,7 @@ def resolve_source_path(gcno_path: str, source_name: str) -> str:
         return source_name
     base_dir = os.path.dirname(gcno_path)
     candidate = os.path.join(base_dir, source_name)
-    if os.path.exists(candidate):
-        return candidate
-    candidate = os.path.join(os.getcwd(), source_name)
-    if os.path.exists(candidate):
-        return candidate
-    return os.path.join(base_dir, source_name)
+    return candidate
 
 
 def print_removed_lines(
