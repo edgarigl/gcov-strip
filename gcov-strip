@@ -75,11 +75,10 @@ def gcno_object_paths(path: str) -> Set[str]:
     rel_gcno = os.path.relpath(abs_gcno, os.getcwd())
     paths = set()
     for gcno_path in (abs_gcno, rel_gcno, os.path.basename(rel_gcno)):
-        if gcno_path.endswith(".gcno"):
-            # Try a few path spellings because linker logs and generated config
-            # files may record the same object as an absolute path, a cwd-
-            # relative path, or just a basename.
-            paths.add(os.path.normpath(gcno_path[:-5] + ".o"))
+        # Try a few path spellings because linker logs and generated config
+        # files may record the same object as an absolute path, a cwd-
+        # relative path, or just a basename.
+        paths.add(os.path.normpath(gcno_path[:-5] + ".o"))
     return paths
 
 
@@ -448,6 +447,9 @@ def handle_gcno_file(
     functions_by_object: DefaultDict[str, Set[str]],
 ) -> Tuple[int, int]:
     """Process one gcno file and return `(changed_files_delta, removed_count)`."""
+    if not path.endswith(".gcno"):
+        raise ValueError(f"expected .gcno file, got {path!r}")
+
     remove_for_file = removal_set_for_gcno(
         path,
         functions_by_object,
