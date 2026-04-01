@@ -973,29 +973,24 @@ def write_output(
 ) -> None:
     """Write or print the generated config lines."""
     if output_path:
-        with open(output_path, "w", encoding="utf-8") as handle:
-            for name in functions:
-                handle.write(f"{name}\n")
-            if inline_only:
-                handle.write("\n# Detected inline functions by DWARF scanning\n")
-                for name in inline_only:
-                    handle.write(f"{name}\n")
-            if review_lines:
-                handle.write("\n")
-                for line in review_lines:
-                    handle.write(f"{line}\n")
-        return
+        handle = open(output_path, "w", encoding="utf-8")
+    else:
+        handle = sys.stdout
 
-    for name in functions:
-        print(name)
-    if inline_only:
-        print("\n# Detected inline functions by DWARF scanning")
-        for name in inline_only:
-            print(name)
-    if review_lines:
-        print()
-        for line in review_lines:
-            print(line)
+    try:
+        for name in functions:
+            handle.write(f"{name}\n")
+        if inline_only:
+            handle.write("\n# Detected inline functions by DWARF scanning\n")
+            for name in inline_only:
+                handle.write(f"{name}\n")
+        if review_lines:
+            handle.write("\n")
+            for line in review_lines:
+                handle.write(f"{line}\n")
+    finally:
+        if output_path:
+            handle.close()
 
 
 def main() -> int:
