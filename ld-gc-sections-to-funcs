@@ -171,6 +171,12 @@ def parse_text_section_name(
         name = parts[0]
     elif len(parts) == 2:
         _, name = parts
+    elif normalize_clones:
+        for candidate in (suffix, ".".join(parts[1:])):
+            name = normalize_name(candidate, True)
+            if "." not in name:
+                return name
+        return None
     else:
         return None
 
