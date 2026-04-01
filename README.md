@@ -13,7 +13,7 @@ This repo contains a minimal example project that:
 
 ## How it works
 
-- `ld_gc_sections_to_funcs.py` parses the linker output and writes
+- `ld-gc-sections-to-funcs` parses the linker output and writes
   `funcs-removed.cfg` with object-qualified removals from garbage collection.
   When possible it writes `object:function` entries so removals are scoped
   to the matching `*.gcno` file instead of applying globally by name.
@@ -22,7 +22,7 @@ This repo contains a minimal example project that:
 - `gcovr` uses the updated `gcno` files to produce the coverage report.
 
 If the linker reports discarded code from an intermediate object that does
-not have a matching `*.gcno` file, `ld_gc_sections_to_funcs.py` scans leaf
+not have a matching `*.gcno` file, `ld-gc-sections-to-funcs` scans leaf
 `*.o` files under the build tree and tries to map each removed name back to
 a single object. If that mapping is ambiguous, it prints a warning and
 falls back to a commented `# REVIEW ...` entry for human review unless
@@ -43,11 +43,11 @@ The object resolution order is:
 6. If resolution is still not unique, emit a commented `# REVIEW ...` entry,
    or fail with `--strict-object-match`.
 
-If the linker drops inline-only functions, `ld_gc_sections_to_funcs.py` can
+If the linker drops inline-only functions, `ld-gc-sections-to-funcs` can
 scan DWARF info to detect them using `--dwarf`:
 
 ```
-./ld_gc_sections_to_funcs.py -o funcs-removed.cfg --dwarf ctest
+./ld-gc-sections-to-funcs -o funcs-removed.cfg --dwarf ctest
 ```
 
 Provide multiple `--dwarf` paths to scan several binaries or objects.
@@ -163,7 +163,7 @@ Assembler DWARF does not block this classification:
 
 ## Strict mode
 
-- `ld_gc_sections_to_funcs.py --strict-object-match` fails instead of falling
+- `ld-gc-sections-to-funcs --strict-object-match` fails instead of falling
   back to a commented review entry when a removed symbol cannot be mapped to a
   single leaf object.
 
