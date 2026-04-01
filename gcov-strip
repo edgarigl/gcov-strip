@@ -25,6 +25,7 @@ GCOV_TAG_FUNCTION = 0x01000000
 GCOV_TAG_LINES = 0x01450000
 GCNO_OLD_HEADER_SIZE = 12
 GCOV_HEADER_SIZE = 16
+GCOV_RECORD_HEADER_SIZE = 8
 GCOV_FUNCTION_METADATA_SIZE = 12
 GCNO_MAGIC_LE = b"oncg"
 SUPPORTED_GCNO_VERSIONS = {
@@ -160,10 +161,10 @@ def iter_gcno_records(
     """Yield `(tag, payload)` pairs for gcno records starting at `start_offset`."""
     offset = start_offset
     while offset < len(data):
-        if offset + 8 > len(data):
+        if offset + GCOV_RECORD_HEADER_SIZE > len(data):
             raise ValueError("truncated record header")
         tag, length = struct.unpack_from("<II", data, offset)
-        offset += 8
+        offset += GCOV_RECORD_HEADER_SIZE
         if tag == 0:
             break
         byte_length = length * 4 if use_word_counts else length
@@ -310,7 +311,7 @@ def handle_function_record(
         state["current_removed_lines"] = None
         return False
 
-    state["removed"] += + 1
+    state["removed"] += 1
 
     if name:
         state["removed_names"].append(name)
