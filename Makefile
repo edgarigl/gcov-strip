@@ -30,6 +30,21 @@ run: $(TARGET)
 	$(GCOVR) --html-details coverage.html --html-self-contained --decisions
 	$(GCOVR)
 
+test:
+	pytest -q
+
+check:
+	pylint gcov-strip ld-gc-sections-to-funcs
+	$(MAKE) test
+
+check-gcc-matrix:
+	for v in 9 10 11 12 13 14; do \
+		$(MAKE) clean >/dev/null && \
+		CC=gcc-$$v GCOV=gcov-$$v $(MAKE) run || exit 1; \
+	done
+
+check-all: check check-gcc-matrix
+
 clean:
 	$(RM) -r dumps
 	$(RM) funcs-removed.cfg
