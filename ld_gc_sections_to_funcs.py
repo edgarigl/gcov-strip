@@ -198,7 +198,7 @@ def object_gcno_candidates(path: str) -> Set[str]:
     gcno_candidates: Set[str] = set()
     for candidate in candidates:
         if candidate.endswith(".o"):
-            gcno_candidates.add(candidate[:-2] + ".gcno")
+            gcno_candidates.add(os.path.splitext(candidate)[0] + ".gcno")
     return gcno_candidates
 
 

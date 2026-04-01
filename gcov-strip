@@ -78,7 +78,7 @@ def gcno_object_paths(path: str) -> Set[str]:
         # Try a few path spellings because linker logs and generated config
         # files may record the same object as an absolute path, a cwd-
         # relative path, or just a basename.
-        paths.add(os.path.normpath(gcno_path[:-5] + ".o"))
+        paths.add(os.path.normpath(os.path.splitext(gcno_path)[0] + ".o"))
     return paths
 
 
