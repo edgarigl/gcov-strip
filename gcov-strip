@@ -260,13 +260,26 @@ def rebuild_gcno(
     }
 
     for tag, payload in iter_gcno_records(data, prefix_end, use_word_counts):
-        if handle_function_record(
+        name = handle_function_record(
             tag,
             payload,
-            remove_functions,
-            list_lines,
             state,
-        ):
+        )
+        if name is not None:
+            state["drop_current"] = name in remove_functions
+            if not state["drop_current"]:
+                state["current_removed_lines"] = None
+                output.extend(struct.pack("<II", tag, len(payload)))
+                output.extend(payload)
+                continue
+
+            state["removed"] += 1
+            state["removed_names"].append(name)
+
+            if list_lines:
+                state["current_removed_lines"] = {}
+                state["removed_lines"].append((name, state["current_removed_lines"]))
+
             continue
 
         if state["drop_current"] and list_lines and tag == GCOV_TAG_LINES:
@@ -296,30 +309,13 @@ def rebuild_gcno(
 def handle_function_record(
     tag: int,
     payload: bytes,
-    remove_functions: Set[str],
-    list_lines: bool,
     state: Dict[str, object],
-) -> bool:
-    """Update removal state when a new function record starts."""
+) -> Optional[str]:
+    """Return the function name when a new function record starts."""
     if tag != GCOV_TAG_FUNCTION:
-        return False
+        return None
 
-    name = parse_function_name(payload, bool(state["use_word_counts"]))
-    state["drop_current"] = name in remove_functions
-    if not state["drop_current"]:
-        state["current_removed_lines"] = None
-        return False
-
-    state["removed"] += 1
-
-    if name:
-        state["removed_names"].append(name)
-
-    if list_lines:
-        label = name or "<unknown>"
-        state["current_removed_lines"] = {}
-        state["removed_lines"].append((label, state["current_removed_lines"]))
-    return True
+    return parse_function_name(payload, bool(state["use_word_counts"]))
 
 
 def find_gcno_files(root: str) -> Iterable[str]:
