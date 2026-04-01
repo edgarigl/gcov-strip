@@ -327,7 +327,10 @@ def find_gcno_files(root: str) -> Iterable[str]:
 
 
 def process_file(
-    path: str, remove_functions: Set[str], list_lines: bool = False
+    path: str,
+    remove_functions: Set[str],
+    list_lines: bool = False,
+    dry_run: bool = False,
 ) -> Tuple[bool, int, List[str], List[Tuple[str, Dict[str, Set[int]]]]]:
     """Rewrite one gcno file in place if any selected functions are removed."""
     with open(path, "rb") as handle:
@@ -339,8 +342,9 @@ def process_file(
     if updated == data:
         return False, removed, removed_names, removed_lines
 
-    with open(path, "wb") as handle:
-        handle.write(updated)
+    if not dry_run:
+        with open(path, "wb") as handle:
+            handle.write(updated)
     return True, removed, removed_names, removed_lines
 
 
@@ -424,18 +428,12 @@ def handle_gcno_file(
         # Skip unrelated gcno files entirely; removals are always object-scoped.
         return 0, 0
 
-    if args.dry_run:
-        with open(path, "rb") as handle:
-            data = handle.read()
-
-        _, removed, removed_names, removed_lines = rebuild_gcno(
-            data, remove_for_file, list_lines=args.list_lines
-        )
-        changed = removed > 0
-    else:
-        changed, removed, removed_names, removed_lines = process_file(
-            path, remove_for_file, list_lines=args.list_lines
-        )
+    changed, removed, removed_names, removed_lines = process_file(
+        path,
+        remove_for_file,
+        list_lines=args.list_lines,
+        dry_run=args.dry_run,
+    )
 
     if args.verbose and removed_names:
         for name in removed_names:
