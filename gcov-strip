@@ -176,17 +176,17 @@ def read_gcov_string(
     payload: bytes,
     offset: int,
     use_word_counts: bool,
-) -> Tuple[Optional[str], int]:
+) -> Tuple[str, int]:
     """Decode one gcov string field and return `(value, new_offset)`."""
     if offset + 4 > len(payload):
-        return None, offset
+        raise ValueError("truncated gcov string length")
     (length,) = struct.unpack_from("<I", payload, offset)
     offset += 4
     if length == 0:
         return "", offset
     byte_length = length * 4 if use_word_counts else length
     if offset + byte_length > len(payload):
-        return None, offset
+        raise ValueError("truncated gcov string payload")
     raw = payload[offset : offset + byte_length]
     offset += byte_length
     nul_index = raw.find(b"\x00")
@@ -201,8 +201,6 @@ def parse_function_name(payload: bytes, use_word_counts: bool) -> Optional[str]:
         return None
     offset = 12
     name, offset = read_gcov_string(payload, offset, use_word_counts)
-    if name is None:
-        return None
     return name
 
 
@@ -226,8 +224,6 @@ def parse_line_record(
             # In line records, `0` switches the current source file or ends the
             # record when followed by an empty string.
             filename, offset = read_gcov_string(payload, offset, use_word_counts)
-            if filename is None:
-                break
             if filename == "":
                 break
             current_file = filename
