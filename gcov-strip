@@ -51,7 +51,7 @@ def parse_config_entry(line: str) -> Tuple[str, str]:
     return os.path.normpath(obj_path), function
 
 
-def load_function_list(
+def load_config(
     path: str,
 ) -> DefaultDict[str, Set[str]]:
     """Load one removal config file."""
@@ -436,7 +436,7 @@ def load_removals(
     """Load all config files into one object-qualified removal map."""
     functions_by_object: DefaultDict[str, Set[str]] = defaultdict(set)
     for path in config_paths:
-        object_functions = load_function_list(path)
+        object_functions = load_config(path)
         for obj_path, names in object_functions.items():
             functions_by_object[obj_path].update(names)
     return functions_by_object
