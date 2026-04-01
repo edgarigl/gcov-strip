@@ -214,8 +214,7 @@ def parse_line_record(
     """Parse one `GCOV_TAG_LINES` payload into `file -> line numbers`."""
     if len(payload) < 4:
         return {}
-    offset = 0
-    offset += 4
+    offset = 4
     current_file: Optional[str] = None
     lines_by_file: Dict[str, Set[int]] = {}
 
