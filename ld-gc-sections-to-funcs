@@ -188,8 +188,8 @@ def normalize_object_path(path: str) -> str:
     return normalized
 
 
-def object_gcno_candidates(path: str) -> Set[str]:
-    """Return gcno path candidates for one object path."""
+def matching_gcno_path(path: str) -> Optional[str]:
+    """Return one existing gcno path for an object, or `None` if none match."""
     normalized = normalize_object_path(path)
     if not normalized.endswith(".o"):
         raise ValueError(f"expected .o path, got {path!r}")
@@ -199,15 +199,11 @@ def object_gcno_candidates(path: str) -> Set[str]:
         candidates.add(os.path.abspath(normalized))
         candidates.add(os.path.basename(normalized))
 
-    gcno_candidates: Set[str] = set()
     for candidate in candidates:
-        gcno_candidates.add(os.path.splitext(candidate)[0] + ".gcno")
-    return gcno_candidates
-
-
-def object_has_matching_gcno(path: str) -> bool:
-    """Return true when an object path appears to own a gcno file."""
-    return any(os.path.exists(candidate) for candidate in object_gcno_candidates(path))
+        gcno_path = os.path.splitext(candidate)[0] + ".gcno"
+        if os.path.exists(gcno_path):
+            return gcno_path
+    return None
 
 
 def object_from_source_path(source_name: str, comp_dir: Optional[str]) -> Optional[str]:
@@ -226,7 +222,7 @@ def object_from_source_path(source_name: str, comp_dir: Optional[str]) -> Option
         if obj_candidate in seen:
             continue
         seen.add(obj_candidate)
-        if object_has_matching_gcno(obj_candidate):
+        if matching_gcno_path(obj_candidate):
             return obj_candidate
     return None
 
@@ -268,7 +264,7 @@ def build_symbol_indexes(
 
     object_paths = list(iter_object_files(root))
     has_gcno_by_object = {
-        normalize_object_path(obj_path): object_has_matching_gcno(
+        normalize_object_path(obj_path): matching_gcno_path(
             normalize_object_path(obj_path)
         )
         for obj_path in object_paths
@@ -305,7 +301,7 @@ def build_removed_object_set(removed_entries: List[FuncKey]) -> Set[str]:
     """Return leaf objects that already appear in linker removals."""
     removed_objects: Set[str] = set()
     for _, obj_path in removed_entries:
-        if obj_path and object_has_matching_gcno(obj_path):
+        if obj_path and matching_gcno_path(obj_path):
             removed_objects.add(obj_path)
     return removed_objects
 
@@ -390,7 +386,7 @@ class RemovalResolver:
         obj_path: Optional[str],
     ) -> Tuple[List[str], List[str], List[str]]:
         """Turn one removed function into config lines, warnings, and reviews."""
-        if obj_path and object_has_matching_gcno(obj_path):
+        if obj_path and matching_gcno_path(obj_path):
             return [f"{obj_path}:{name}"], [], []
 
         leaf_objects = sorted(self.gcno_symbol_index.get(name, set()))
@@ -440,7 +436,7 @@ class RemovalResolver:
         uncovered_objects = sorted(
             path
             for path in self.leaf_symbol_index.get(name, set())
-            if not object_has_matching_gcno(path)
+            if not matching_gcno_path(path)
         )
         if uncovered_objects and (
             name not in self.defined_names or name in self.assembly_defined_names
@@ -604,7 +600,7 @@ class DwarfScanner:
         """
         Resolve the leaf object that should own the gcno for one DIE.
         """
-        if die.dwarf_object and object_has_matching_gcno(die.dwarf_object):
+        if die.dwarf_object and matching_gcno_path(die.dwarf_object):
             return normalize_object_path(die.dwarf_object)
 
         if die.cu_offset is None:
