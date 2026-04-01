@@ -24,6 +24,21 @@ from typing import DefaultDict, Dict, Iterable, List, Optional, Set, Tuple
 GCOV_TAG_FUNCTION = 0x01000000
 GCOV_TAG_LINES = 0x01450000
 GCOV_HEADER_SIZE = 16
+GCNO_MAGIC_LE = b"oncg"
+SUPPORTED_GCNO_VERSIONS = {
+    b"*59A",
+    b"*50B",
+    b"*51B",
+    b"*42B",
+    b"*33B",
+    b"*24B",
+}
+WORD_COUNT_GCNO_VERSIONS = {
+    b"*59A",
+    b"*50B",
+    b"*51B",
+}
+BYTE_COUNT_GCNO_BASELINE = "B24*"
 
 
 def parse_config_entry(line: str) -> Tuple[str, str]:
@@ -79,23 +94,79 @@ def removal_set_for_gcno(
     return matched
 
 
-def record_start_offset(data: bytes) -> int:
+def format_gcov_version(version: bytes) -> str:
+    """Format one raw gcov version field as its usual human-readable string."""
+    return version.decode("ascii", errors="replace")[::-1]
+
+
+def gcov_version_sort_key(version: str) -> Optional[Tuple[str, int]]:
+    """Turn one gcov version string like `B24*` into a comparable key."""
+    if len(version) != 4 or version[0].isalpha() is False or version[3] != "*":
+        return None
+    if version[1:3].isdigit() is False:
+        return None
+    return version[0], int(version[1:3])
+
+
+def select_gcno_layout(data: bytes) -> bool:
+    """Validate the gcno header and choose the matching length layout."""
+    if len(data) < GCOV_HEADER_SIZE:
+        raise ValueError("missing gcno header")
+
+    magic = data[:4]
+    version = data[4:8]
+
+    if magic != GCNO_MAGIC_LE:
+        raise ValueError(
+            "unsupported gcno magic "
+            f"{magic!r}; expected little-endian gcno magic {GCNO_MAGIC_LE!r}"
+        )
+
+    if version in SUPPORTED_GCNO_VERSIONS:
+        return version in WORD_COUNT_GCNO_VERSIONS
+
+    version_text = format_gcov_version(version)
+    version_key = gcov_version_sort_key(version_text)
+    baseline_key = gcov_version_sort_key(BYTE_COUNT_GCNO_BASELINE)
+    if version_key is not None and baseline_key is not None and version_key >= baseline_key:
+        print(
+            "warning: unsupported gcno version "
+            f"{version_text}; assuming byte-count layout",
+            file=sys.stderr,
+        )
+        return False
+
+    supported = ", ".join(
+        sorted(format_gcov_version(raw) for raw in SUPPORTED_GCNO_VERSIONS)
+    )
+    raise ValueError(
+        "unsupported gcno version "
+        f"{version_text}; supported versions: {supported}"
+    )
+
+
+def record_start_offset(data: bytes, use_word_counts: bool) -> int:
     """Return the byte offset where per-function gcno records begin."""
-    offset = GCOV_HEADER_SIZE
+    offset = 12 if use_word_counts else GCOV_HEADER_SIZE
     if offset + 4 > len(data):
-        raise ValueError("missing unit record")
+        raise ValueError("missing cwd record")
     (length,) = struct.unpack_from("<I", data, offset)
     offset += 4
-    if offset + length > len(data):
-        raise ValueError("truncated unit record")
-    offset += length
+    byte_length = length * 4 if use_word_counts else length
+    if offset + byte_length > len(data):
+        raise ValueError("truncated cwd record")
+    offset += byte_length
     if offset + 4 > len(data):
-        raise ValueError("truncated unit record checksum")
+        raise ValueError("truncated cwd terminator")
     offset += 4
     return offset
 
 
-def iter_gcno_records(data: bytes, start_offset: int) -> Iterable[Tuple[int, bytes]]:
+def iter_gcno_records(
+    data: bytes,
+    start_offset: int,
+    use_word_counts: bool,
+) -> Iterable[Tuple[int, bytes]]:
     """Yield `(tag, payload)` pairs for gcno records starting at `start_offset`."""
     offset = start_offset
     while offset < len(data):
@@ -105,14 +176,19 @@ def iter_gcno_records(data: bytes, start_offset: int) -> Iterable[Tuple[int, byt
         offset += 8
         if tag == 0:
             break
-        if offset + length > len(data):
+        byte_length = length * 4 if use_word_counts else length
+        if offset + byte_length > len(data):
             raise ValueError("truncated record payload")
-        payload = data[offset : offset + length]
-        offset += length
+        payload = data[offset : offset + byte_length]
+        offset += byte_length
         yield tag, payload
 
 
-def read_gcov_string(payload: bytes, offset: int) -> Tuple[Optional[str], int]:
+def read_gcov_string(
+    payload: bytes,
+    offset: int,
+    use_word_counts: bool,
+) -> Tuple[Optional[str], int]:
     """Decode one gcov string field and return `(value, new_offset)`."""
     if offset + 4 > len(payload):
         return None, offset
@@ -120,28 +196,32 @@ def read_gcov_string(payload: bytes, offset: int) -> Tuple[Optional[str], int]:
     offset += 4
     if length == 0:
         return "", offset
-    if offset + length > len(payload):
+    byte_length = length * 4 if use_word_counts else length
+    if offset + byte_length > len(payload):
         return None, offset
-    raw = payload[offset : offset + length]
-    offset += length
+    raw = payload[offset : offset + byte_length]
+    offset += byte_length
     nul_index = raw.find(b"\x00")
     if nul_index != -1:
         raw = raw[:nul_index]
     return raw.decode("utf-8", errors="replace"), offset
 
 
-def parse_function_name(payload: bytes) -> Optional[str]:
+def parse_function_name(payload: bytes, use_word_counts: bool) -> Optional[str]:
     """Extract a function name from a `GCOV_TAG_FUNCTION` payload."""
     if len(payload) < 12:
         return None
     offset = 12
-    name, offset = read_gcov_string(payload, offset)
+    name, offset = read_gcov_string(payload, offset, use_word_counts)
     if name is None:
         return None
     return name
 
 
-def parse_line_record(payload: bytes) -> Dict[str, Set[int]]:
+def parse_line_record(
+    payload: bytes,
+    use_word_counts: bool,
+) -> Dict[str, Set[int]]:
     """Parse one `GCOV_TAG_LINES` payload into `file -> line numbers`."""
     if len(payload) < 4:
         return {}
@@ -157,7 +237,7 @@ def parse_line_record(payload: bytes) -> Dict[str, Set[int]]:
         if line_number == 0:
             # In line records, `0` switches the current source file or ends the
             # record when followed by an empty string.
-            filename, offset = read_gcov_string(payload, offset)
+            filename, offset = read_gcov_string(payload, offset, use_word_counts)
             if filename is None:
                 break
             if filename == "":
@@ -179,10 +259,8 @@ def rebuild_gcno(
     list_lines: bool = False,
 ) -> Tuple[bytes, int, List[str], List[Tuple[str, Dict[str, Set[int]]]]]:
     """Rewrite one gcno file in memory with selected functions removed."""
-    if len(data) < GCOV_HEADER_SIZE:
-        raise ValueError("missing gcno header")
-
-    prefix_end = record_start_offset(data)
+    use_word_counts = select_gcno_layout(data)
+    prefix_end = record_start_offset(data, use_word_counts)
     output = bytearray()
     output.extend(data[:prefix_end])
 
@@ -192,17 +270,24 @@ def rebuild_gcno(
         "removed_names": [],
         "removed_lines": [],
         "current_removed_lines": None,
+        "use_word_counts": use_word_counts,
     }
 
-    for tag, payload in iter_gcno_records(data, prefix_end):
-        if handle_function_record(tag, payload, remove_functions, list_lines, state):
+    for tag, payload in iter_gcno_records(data, prefix_end, use_word_counts):
+        if handle_function_record(
+            tag,
+            payload,
+            remove_functions,
+            list_lines,
+            state,
+        ):
             continue
 
         if state["skip_current"] and list_lines and tag == GCOV_TAG_LINES:
             # Line records arrive after the owning function record, so collect
             # them before dropping the bytes from the rebuilt output.
             if state["current_removed_lines"] is not None:
-                parsed = parse_line_record(payload)
+                parsed = parse_line_record(payload, use_word_counts)
                 for filename, lines in parsed.items():
                     state["current_removed_lines"].setdefault(filename, set()).update(lines)
             continue
@@ -233,7 +318,7 @@ def handle_function_record(
     if tag != GCOV_TAG_FUNCTION:
         return False
 
-    name = parse_function_name(payload)
+    name = parse_function_name(payload, bool(state["use_word_counts"]))
     state["skip_current"] = name in remove_functions
     if not state["skip_current"]:
         state["current_removed_lines"] = None
