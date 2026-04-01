@@ -932,7 +932,7 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help=(
             "Path to a binary/object file with DWARF info; may be repeated. "
-            "Inline-only functions are added when all their inlined callers "
+            "Inline-only functions are added when all their callers "
             "are removed."
         ),
     )
