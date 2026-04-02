@@ -74,20 +74,31 @@ check-dwarf-consistency:
 			exit 1; \
 		}; \
 		cp funcs-removed.cfg $$base_cfg; \
-		for dwarf_v in g 2 3 4; do \
-			cfg=/tmp/funcs-removed-gcc-$$gcc_v-dwarf-$$dwarf_v.cfg; \
-			if [ "$$dwarf_v" = "g" ]; then \
-				variant_flags="$(CFLAGS)"; \
-				variant_name="-g"; \
-			else \
-				variant_flags="$(CFLAGS) -gdwarf-$$dwarf_v"; \
-				variant_name="-gdwarf-$$dwarf_v"; \
-			fi; \
+		for variant in g gno-strict-dwarf 2 3 4 5-gno-strict-dwarf; do \
+			cfg=/tmp/funcs-removed-gcc-$$gcc_v-dwarf-$$variant.cfg; \
+			case "$$variant" in \
+				g) \
+					variant_flags="$(CFLAGS)"; \
+					variant_name="-g"; \
+					;; \
+				gno-strict-dwarf) \
+					variant_flags="$(CFLAGS) -gno-strict-dwarf"; \
+					variant_name="-g -gno-strict-dwarf"; \
+					;; \
+				5-gno-strict-dwarf) \
+					variant_flags="$(CFLAGS) -gdwarf-5 -gno-strict-dwarf"; \
+					variant_name="-gdwarf-5 -gno-strict-dwarf"; \
+					;; \
+				*) \
+					variant_flags="$(CFLAGS) -gdwarf-$$variant"; \
+					variant_name="-gdwarf-$$variant"; \
+					;; \
+			esac; \
 			$(MAKE) clean >/dev/null; \
 			CC=gcc-$$gcc_v GCOV=gcov-$$gcc_v \
 				CFLAGS="$$variant_flags" \
-				$(MAKE) $(TARGET) >/tmp/check-dwarf-consistency-$$gcc_v-$$dwarf_v.log 2>&1 || { \
-				cat /tmp/check-dwarf-consistency-$$gcc_v-$$dwarf_v.log; \
+				$(MAKE) $(TARGET) >/tmp/check-dwarf-consistency-$$gcc_v-$$variant.log 2>&1 || { \
+				cat /tmp/check-dwarf-consistency-$$gcc_v-$$variant.log; \
 				exit 1; \
 			}; \
 			cp funcs-removed.cfg $$cfg; \
