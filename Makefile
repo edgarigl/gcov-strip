@@ -25,6 +25,8 @@ ASFLAGS = -static -nostdlib -nostartfiles
 
 all: $(TARGET)
 
+.PHONY: all run test check check-gcc-matrix check-readelf-matrix check-all clean distclean help
+
 $(OBJS): Makefile
 
 $(TARGET): $(OBJS)
@@ -64,6 +66,18 @@ check-readelf-matrix:
 	tests/check-readelf-matrix.sh 2>&1 | tee "$(READELF_MATRIX_LOG)"
 
 check-all: check check-gcc-matrix check-readelf-matrix
+
+help:
+	@printf '%s\n' \
+		"Targets:" \
+		"  make run                  Build, run, and generate coverage output" \
+		"  make test                 Run pytest regression tests" \
+		"  make check                Run pylint and pytest" \
+		"  make check-gcc-matrix     Run the GCC coverage matrix" \
+		"  make check-readelf-matrix Run the GCC/DWARF/readelf matrix" \
+		"  make check-all            Run all checks" \
+		"  make clean                Remove build output and cached build dirs" \
+		"  make distclean            Also remove cached binutils downloads"
 
 clean:
 	$(RM) -r dumps

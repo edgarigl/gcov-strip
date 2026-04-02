@@ -118,6 +118,31 @@ make clean && make run
 The `make` step already runs `gcov-strip` and prints any removed source
 lines. `make run` executes the binary and writes `coverage.html`.
 
+## Testing
+
+The repo has three main test entry points:
+
+- `make check` runs `pylint` plus the `pytest` regression tests.
+- `make check-gcc-matrix` runs the example end-to-end with each installed
+  `gcc-X` / `gcov-X` pair from `GCC_VERSIONS`.
+- `make check-readelf-matrix` runs the broader DWARF/readelf matrix. It tests
+  each installed GCC across the configured DWARF flag variants and compares the
+  generated `funcs-removed.cfg` across the selected binutils `readelf`
+  versions.
+
+The readelf matrix writes:
+
+- `tests/cache/check-readelf-matrix.log` with the full run log
+- `tests/cache/check-readelf-matrix.csv` with per-case status rows
+
+and prints a compact terminal summary showing:
+
+- `ok` / `skip` / `fail` per `gcc + DWARF variant`
+- the exercised readelf/binutils versions and how many matrix cases each one
+  covered
+
+Use `make help` to list the common targets.
+
 ## gcov-strip usage
 
 Strip functions listed in `funcs-removed.cfg` and print removed lines:
