@@ -3,6 +3,7 @@ CC ?= $(CROSS)gcc
 GCOV ?= gcov
 GCOVR=gcovr --gcov-executable $(GCOV)
 READELF ?= readelf
+SHELL := /bin/bash
 
 CFLAGS = -Wall -O2 -g
 CFLAGS += -ffunction-sections
@@ -16,8 +17,9 @@ LDFLAGS += -Wl,--gc-sections -Wl,--print-gc-sections
 TARGET = ctest
 OBJS = ctest.o foo.o bar.o
 GCC_VERSIONS ?= 9 10 11 12 13 14 15 16 17 18 19 20
-BINUTILS_VERSIONS ?= 2.42 2.43.1 2.44 2.45 2.46.0
+BINUTILS_VERSIONS ?= 2.26 2.30 2.34 2.42 2.43.1 2.44 2.45 2.46.0
 READELF_VARIANTS ?= g gno-strict-dwarf 2 3 4 5 5-gno-strict-dwarf 5-gdwarf64 5-gdwarf64-gno-strict-dwarf
+READELF_MATRIX_LOG ?= tests/cache/check-readelf-matrix.log
 
 ASFLAGS = -static -nostdlib -nostartfiles
 
@@ -53,11 +55,13 @@ check-gcc-matrix:
 	done
 
 check-readelf-matrix:
+	@mkdir -p $(dir $(READELF_MATRIX_LOG))
+	@set -o pipefail; \
 	GCC_VERSIONS="$(GCC_VERSIONS)" \
 	BINUTILS_VERSIONS="$(BINUTILS_VERSIONS)" \
 	VARIANTS="$(READELF_VARIANTS)" \
 	BASELINE_READELF="$(READELF)" \
-	tests/check-readelf-matrix.sh
+	tests/check-readelf-matrix.sh 2>&1 | tee "$(READELF_MATRIX_LOG)"
 
 check-all: check check-gcc-matrix check-readelf-matrix
 
