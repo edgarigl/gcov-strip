@@ -2,6 +2,7 @@
 CC ?= $(CROSS)gcc
 GCOV ?= gcov
 GCOVR=gcovr --gcov-executable $(GCOV)
+READELF ?= readelf
 
 CFLAGS = -Wall -O2 -g
 CFLAGS += -ffunction-sections
@@ -15,6 +16,8 @@ LDFLAGS += -Wl,--gc-sections -Wl,--print-gc-sections
 TARGET = ctest
 OBJS = ctest.o foo.o bar.o
 GCC_VERSIONS ?= 9 10 11 12 13 14 15 16 17 18 19 20
+BINUTILS_VERSIONS ?= 2.42 2.43 2.44
+READELF_VARIANTS ?= g gno-strict-dwarf 2 3 4 5 5-gno-strict-dwarf 5-gdwarf64 5-gdwarf64-gno-strict-dwarf
 
 ASFLAGS = -static -nostdlib -nostartfiles
 
@@ -23,7 +26,8 @@ all: $(TARGET)
 $(OBJS): Makefile
 
 $(TARGET): $(OBJS)
-	$(LINK.o) $^ $(LOADLIBES) $(LDLIBS) -o $@ 2>&1 | ./ld-gc-sections-to-funcs -o funcs-removed.cfg
+	$(LINK.o) $^ $(LOADLIBES) $(LDLIBS) -o $@ 2>&1 | \
+		./ld-gc-sections-to-funcs --readelf "$(READELF)" -o funcs-removed.cfg
 	./gcov-strip -c funcs-removed.cfg --verbose --list-lines
 
 run: $(TARGET)
@@ -48,114 +52,21 @@ check-gcc-matrix:
 		CC=gcc-$$v GCOV=gcov-$$v $(MAKE) run || exit 1; \
 	done
 
-check-dwarf-matrix:
-	@for gcc_v in $(GCC_VERSIONS); do \
-		if ! command -v gcc-$$gcc_v >/dev/null 2>&1 || \
-		   ! command -v gcov-$$gcc_v >/dev/null 2>&1; then \
-			continue; \
-		fi; \
-		for dwarf_v in 2 3 4 5; do \
-			echo "== gcc-$$gcc_v -gdwarf-$$dwarf_v =="; \
-			$(MAKE) clean >/dev/null; \
-			if ! CC=gcc-$$gcc_v GCOV=gcov-$$gcc_v \
-				CFLAGS="$(CFLAGS) -gdwarf-$$dwarf_v" \
-				$(MAKE) run >/tmp/check-dwarf-$$gcc_v-$$dwarf_v.log 2>&1; then \
-				if grep -Eq "unrecognized .*gdwarf|dwarf version .*is not supported|unknown DWARF version" \
-					/tmp/check-dwarf-$$gcc_v-$$dwarf_v.log; then \
-					echo "skip gcc-$$gcc_v -gdwarf-$$dwarf_v"; \
-					continue; \
-				fi; \
-				cat /tmp/check-dwarf-$$gcc_v-$$dwarf_v.log; \
-				exit 1; \
-			fi; \
-		done; \
-	done
+check-readelf-matrix:
+	GCC_VERSIONS="$(GCC_VERSIONS)" \
+	BINUTILS_VERSIONS="$(BINUTILS_VERSIONS)" \
+	VARIANTS="$(READELF_VARIANTS)" \
+	BASELINE_READELF="$(READELF)" \
+	tests/check-readelf-matrix.sh
 
-check-dwarf-consistency:
-	@for gcc_v in $(GCC_VERSIONS); do \
-		base_cfg=/tmp/funcs-removed-gcc-$$gcc_v-dwarf-5.cfg; \
-		if ! command -v gcc-$$gcc_v >/dev/null 2>&1 || \
-		   ! command -v gcov-$$gcc_v >/dev/null 2>&1; then \
-			continue; \
-		fi; \
-		echo "== gcc-$$gcc_v dwarf consistency =="; \
-		$(MAKE) clean >/dev/null; \
-		CC=gcc-$$gcc_v GCOV=gcov-$$gcc_v \
-			CFLAGS="$(CFLAGS) -gdwarf-5" \
-			$(MAKE) $(TARGET) >/tmp/check-dwarf-consistency-$$gcc_v-5.log 2>&1 || { \
-			cat /tmp/check-dwarf-consistency-$$gcc_v-5.log; \
-			exit 1; \
-		}; \
-		cp funcs-removed.cfg $$base_cfg; \
-		for variant in g gno-strict-dwarf 2 3 4 5-gno-strict-dwarf; do \
-			cfg=/tmp/funcs-removed-gcc-$$gcc_v-dwarf-$$variant.cfg; \
-			case "$$variant" in \
-				g) \
-					variant_flags="$(CFLAGS)"; \
-					variant_name="-g"; \
-					;; \
-				gno-strict-dwarf) \
-					variant_flags="$(CFLAGS) -gno-strict-dwarf"; \
-					variant_name="-g -gno-strict-dwarf"; \
-					;; \
-				5-gno-strict-dwarf) \
-					variant_flags="$(CFLAGS) -gdwarf-5 -gno-strict-dwarf"; \
-					variant_name="-gdwarf-5 -gno-strict-dwarf"; \
-					;; \
-				*) \
-					variant_flags="$(CFLAGS) -gdwarf-$$variant"; \
-					variant_name="-gdwarf-$$variant"; \
-					;; \
-			esac; \
-			$(MAKE) clean >/dev/null; \
-			CC=gcc-$$gcc_v GCOV=gcov-$$gcc_v \
-				CFLAGS="$$variant_flags" \
-				$(MAKE) $(TARGET) >/tmp/check-dwarf-consistency-$$gcc_v-$$variant.log 2>&1 || { \
-				cat /tmp/check-dwarf-consistency-$$gcc_v-$$variant.log; \
-				exit 1; \
-			}; \
-			cp funcs-removed.cfg $$cfg; \
-			if ! diff -u $$base_cfg $$cfg; then \
-				echo "DWARF config mismatch for gcc-$$gcc_v: -gdwarf-5 vs $$variant_name"; \
-				exit 1; \
-			fi; \
-		done; \
-		for variant in 5-gdwarf64 5-gdwarf64-gno-strict-dwarf; do \
-			cfg=/tmp/funcs-removed-gcc-$$gcc_v-dwarf-$$variant.cfg; \
-			case "$$variant" in \
-				5-gdwarf64) \
-					variant_flags="$(CFLAGS) -gdwarf-5 -gdwarf64"; \
-					variant_name="-gdwarf-5 -gdwarf64"; \
-					;; \
-				5-gdwarf64-gno-strict-dwarf) \
-					variant_flags="$(CFLAGS) -gdwarf-5 -gdwarf64 -gno-strict-dwarf"; \
-					variant_name="-gdwarf-5 -gdwarf64 -gno-strict-dwarf"; \
-					;; \
-			esac; \
-			$(MAKE) clean >/dev/null; \
-			if ! CC=gcc-$$gcc_v GCOV=gcov-$$gcc_v \
-				CFLAGS="$$variant_flags" \
-				$(MAKE) $(TARGET) >/tmp/check-dwarf-consistency-$$gcc_v-$$variant.log 2>&1; then \
-				if grep -Eq "unrecognized .*gdwarf64|dwarf64.*not supported|sorry, unimplemented: 64-bit DWARF" \
-					/tmp/check-dwarf-consistency-$$gcc_v-$$variant.log; then \
-					echo "skip gcc-$$gcc_v $$variant_name"; \
-					continue; \
-				fi; \
-				cat /tmp/check-dwarf-consistency-$$gcc_v-$$variant.log; \
-				exit 1; \
-			fi; \
-			cp funcs-removed.cfg $$cfg; \
-			if ! diff -u $$base_cfg $$cfg; then \
-				echo "DWARF config mismatch for gcc-$$gcc_v: -gdwarf-5 vs $$variant_name"; \
-				exit 1; \
-			fi; \
-		done; \
-	done
-
-check-all: check check-gcc-matrix check-dwarf-matrix check-dwarf-consistency
+check-all: check check-gcc-matrix check-readelf-matrix
 
 clean:
 	$(RM) -r dumps
+	$(RM) -r tests/cache/build
 	$(RM) funcs-removed.cfg
 	$(RM) $(OBJS) $(TARGET)
 	$(RM) *.gcda *.gcno *.gcov coverage*.html
+
+distclean: clean
+	$(RM) -r tests/cache/binutils tests/cache/src
