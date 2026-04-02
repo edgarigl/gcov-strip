@@ -13,8 +13,61 @@ BASELINE_READELF="${BASELINE_READELF-readelf}"
 BASELINE_NAME="${BASELINE_NAME-host}"
 REFERENCE_GCC_VERSION="${REFERENCE_GCC_VERSION-}"
 REFERENCE_VARIANT="${REFERENCE_VARIANT-5}"
+REFERENCE_NAME="${REFERENCE_NAME-matrix-reference}"
 JOBS="${JOBS-$(nproc)}"
 PREP_JOBS="${PREP_JOBS-2}"
+SUMMARY_CSV="${SUMMARY_CSV-$ROOT/tests/cache/check-readelf-matrix.csv}"
+
+declare -A SUMMARY_STATUS
+
+
+record_summary() {
+    local gcc_version="$1"
+    local variant="$2"
+    local status="$3"
+
+    SUMMARY_STATUS["$gcc_version:$variant"]="$status"
+}
+
+
+append_csv() {
+    local gcc_version="$1"
+    local variant="$2"
+    local binutils_version="$3"
+    local status="$4"
+    local detail="$5"
+
+    printf '%s,%s,%s,%s,%s\n' \
+        "$gcc_version" "$variant" "$binutils_version" "$status" "$detail" \
+        >>"$SUMMARY_CSV"
+}
+
+
+print_summary_table() {
+    local gcc_version
+    local variant
+    local status
+
+    printf '\nSummary:\n'
+    printf '%-8s' "gcc"
+    for variant in $VARIANTS; do
+        printf ' %-8s' "$variant"
+    done
+    printf '\n'
+
+    for gcc_version in $GCC_VERSIONS; do
+        if ! have_toolchain "$gcc_version"; then
+            continue
+        fi
+
+        printf '%-8s' "gcc-$gcc_version"
+        for variant in $VARIANTS; do
+            status="${SUMMARY_STATUS["$gcc_version:$variant"]-skip}"
+            printf ' %-8s' "$status"
+        done
+        printf '\n'
+    done
+}
 
 run_matrix_case() {
     local gcc_version="$1"
@@ -154,14 +207,17 @@ if [ -z "$global_reference_gcc" ]; then
     exit 0
 fi
 
+mkdir -p "$(dirname "$SUMMARY_CSV")"
+printf '%s\n' "gcc,variant,binutils,status,detail" >"$SUMMARY_CSV"
+
 global_reference_label="$(variant_name "$REFERENCE_VARIANT")"
 global_reference_flags="$(variant_flags "$REFERENCE_VARIANT")"
 global_reference_cfg="/tmp/funcs-removed-gcc-$global_reference_gcc-reference.cfg"
 global_reference_log="/tmp/check-readelf-gcc-$global_reference_gcc-reference.log"
 
 echo \
-    "== reference gcc-$global_reference_gcc $global_reference_label " \
-    "$BASELINE_NAME =="
+    "== $REFERENCE_NAME gcc-$global_reference_gcc " \
+    "$global_reference_label =="
 echo "   gcc: $(tool_version_line "gcc-$global_reference_gcc")"
 if ! run_matrix_case \
     "$global_reference_gcc" \
@@ -194,19 +250,32 @@ for gcc_version in $GCC_VERSIONS; do
             "$baseline_cfg" \
             "$baseline_log"; then
             if variant_unsupported "$baseline_log"; then
+                record_summary "$gcc_version" "$variant" "skip"
+                append_csv "$gcc_version" "$variant" "$BASELINE_NAME" "skip" \
+                    "unsupported"
                 echo "skip gcc-$gcc_version $label" >&2
                 continue
             fi
+            record_summary "$gcc_version" "$variant" "fail"
+            append_csv "$gcc_version" "$variant" "$BASELINE_NAME" "fail" \
+                "baseline-build"
             cat "$baseline_log"
             exit 1
         fi
 
         if ! diff -u "$global_reference_cfg" "$baseline_cfg"; then
+            record_summary "$gcc_version" "$variant" "fail"
+            append_csv "$gcc_version" "$variant" "$BASELINE_NAME" "fail" \
+                "global-mismatch"
             echo \
                 "global config mismatch for gcc-$gcc_version $label: " \
-                "reference gcc-$global_reference_gcc $global_reference_label"
+                "$REFERENCE_NAME gcc-$global_reference_gcc " \
+                "$global_reference_label"
             exit 1
         fi
+
+        record_summary "$gcc_version" "$variant" "ok"
+        append_csv "$gcc_version" "$variant" "$BASELINE_NAME" "ok" "baseline"
 
         for binutils_version in $BINUTILS_VERSIONS; do
             readelf_bin="$INSTALL_DIR/$binutils_version/bin/readelf"
@@ -220,11 +289,17 @@ for gcc_version in $GCC_VERSIONS; do
                 "$readelf_bin" \
                 "$cfg" \
                 "$log_path"; then
+                record_summary "$gcc_version" "$variant" "fail"
+                append_csv "$gcc_version" "$variant" "$binutils_version" "fail" \
+                    "matrix-build"
                 cat "$log_path"
                 exit 1
             fi
 
             if ! diff -u "$baseline_cfg" "$cfg"; then
+                record_summary "$gcc_version" "$variant" "fail"
+                append_csv "$gcc_version" "$variant" "$binutils_version" "fail" \
+                    "baseline-mismatch"
                 echo \
                     "readelf config mismatch for gcc-$gcc_version $label: " \
                     "$BASELINE_NAME vs binutils-$binutils_version"
@@ -232,12 +307,19 @@ for gcc_version in $GCC_VERSIONS; do
             fi
 
             if ! diff -u "$global_reference_cfg" "$cfg"; then
+                record_summary "$gcc_version" "$variant" "fail"
+                append_csv "$gcc_version" "$variant" "$binutils_version" "fail" \
+                    "global-mismatch"
                 echo \
                     "global config mismatch for gcc-$gcc_version $label " \
-                    "binutils-$binutils_version: reference gcc-" \
+                    "binutils-$binutils_version: $REFERENCE_NAME gcc-" \
                     "$global_reference_gcc $global_reference_label"
                 exit 1
             fi
+
+            append_csv "$gcc_version" "$variant" "$binutils_version" "ok" "match"
         done
     done
 done
+
+print_summary_table
