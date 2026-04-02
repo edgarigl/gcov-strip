@@ -19,6 +19,7 @@ PREP_JOBS="${PREP_JOBS-2}"
 SUMMARY_CSV="${SUMMARY_CSV-$ROOT/tests/cache/check-readelf-matrix.csv}"
 
 declare -A SUMMARY_STATUS
+declare -A BINUTILS_OK_COUNT
 
 
 record_summary() {
@@ -66,6 +67,30 @@ print_summary_table() {
             printf ' %-8s' "$status"
         done
         printf '\n'
+    done
+}
+
+
+record_binutils_ok() {
+    local binutils_version="$1"
+    local ok_count="${BINUTILS_OK_COUNT["$binutils_version"]-0}"
+
+    BINUTILS_OK_COUNT["$binutils_version"]=$((ok_count + 1))
+}
+
+
+print_binutils_summary() {
+    local binutils_version
+    local ok_count
+
+    printf '\nReadelf coverage:\n'
+    printf '%-18s %s\n' "readelf" "ok-cases"
+    ok_count="${BINUTILS_OK_COUNT["$BASELINE_NAME"]-0}"
+    printf '%-18s %s\n' "$BASELINE_NAME" "$ok_count"
+
+    for binutils_version in $BINUTILS_VERSIONS; do
+        ok_count="${BINUTILS_OK_COUNT["$binutils_version"]-0}"
+        printf '%-18s %s\n' "binutils-$binutils_version" "$ok_count"
     done
 }
 
@@ -276,6 +301,7 @@ for gcc_version in $GCC_VERSIONS; do
 
         record_summary "$gcc_version" "$variant" "ok"
         append_csv "$gcc_version" "$variant" "$BASELINE_NAME" "ok" "baseline"
+        record_binutils_ok "$BASELINE_NAME"
 
         for binutils_version in $BINUTILS_VERSIONS; do
             readelf_bin="$INSTALL_DIR/$binutils_version/bin/readelf"
@@ -318,8 +344,10 @@ for gcc_version in $GCC_VERSIONS; do
             fi
 
             append_csv "$gcc_version" "$variant" "$binutils_version" "ok" "match"
+            record_binutils_ok "$binutils_version"
         done
     done
 done
 
 print_summary_table
+print_binutils_summary
