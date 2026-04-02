@@ -43,7 +43,62 @@ check-gcc-matrix:
 		CC=gcc-$$v GCOV=gcov-$$v $(MAKE) run || exit 1; \
 	done
 
-check-all: check check-gcc-matrix
+check-dwarf-matrix:
+	for gcc_v in 9 10 11 12 13 14; do \
+		for dwarf_v in 2 3 4 5; do \
+			echo "== gcc-$$gcc_v -gdwarf-$$dwarf_v =="; \
+			$(MAKE) clean >/dev/null; \
+			if ! CC=gcc-$$gcc_v GCOV=gcov-$$gcc_v \
+				CFLAGS="$(CFLAGS) -gdwarf-$$dwarf_v" \
+				$(MAKE) run >/tmp/check-dwarf-$$gcc_v-$$dwarf_v.log 2>&1; then \
+				if grep -Eq "unrecognized .*gdwarf|dwarf version .*is not supported|unknown DWARF version" \
+					/tmp/check-dwarf-$$gcc_v-$$dwarf_v.log; then \
+					echo "skip gcc-$$gcc_v -gdwarf-$$dwarf_v"; \
+					continue; \
+				fi; \
+				cat /tmp/check-dwarf-$$gcc_v-$$dwarf_v.log; \
+				exit 1; \
+			fi; \
+		done; \
+	done
+
+check-dwarf-consistency:
+	for gcc_v in 9 10 11 12 13 14; do \
+		base_cfg=/tmp/funcs-removed-gcc-$$gcc_v-dwarf-5.cfg; \
+		echo "== gcc-$$gcc_v dwarf consistency =="; \
+		$(MAKE) clean >/dev/null; \
+		CC=gcc-$$gcc_v GCOV=gcov-$$gcc_v \
+			CFLAGS="$(CFLAGS) -gdwarf-5" \
+			$(MAKE) $(TARGET) >/tmp/check-dwarf-consistency-$$gcc_v-5.log 2>&1 || { \
+			cat /tmp/check-dwarf-consistency-$$gcc_v-5.log; \
+			exit 1; \
+		}; \
+		cp funcs-removed.cfg $$base_cfg; \
+		for dwarf_v in g 2 3 4; do \
+			cfg=/tmp/funcs-removed-gcc-$$gcc_v-dwarf-$$dwarf_v.cfg; \
+			if [ "$$dwarf_v" = "g" ]; then \
+				variant_flags="$(CFLAGS)"; \
+				variant_name="-g"; \
+			else \
+				variant_flags="$(CFLAGS) -gdwarf-$$dwarf_v"; \
+				variant_name="-gdwarf-$$dwarf_v"; \
+			fi; \
+			$(MAKE) clean >/dev/null; \
+			CC=gcc-$$gcc_v GCOV=gcov-$$gcc_v \
+				CFLAGS="$$variant_flags" \
+				$(MAKE) $(TARGET) >/tmp/check-dwarf-consistency-$$gcc_v-$$dwarf_v.log 2>&1 || { \
+				cat /tmp/check-dwarf-consistency-$$gcc_v-$$dwarf_v.log; \
+				exit 1; \
+			}; \
+			cp funcs-removed.cfg $$cfg; \
+			if ! diff -u $$base_cfg $$cfg; then \
+				echo "DWARF config mismatch for gcc-$$gcc_v: -gdwarf-5 vs $$variant_name"; \
+				exit 1; \
+			fi; \
+		done; \
+	done
+
+check-all: check check-gcc-matrix check-dwarf-matrix check-dwarf-consistency
 
 clean:
 	$(RM) -r dumps
