@@ -558,9 +558,9 @@ def parse_object_scoped_entry(line: str) -> FuncKey:
     return function, normalize_object_path(obj_path)
 
 
-def iter_readelf(path: str) -> Iterable[str]:
+def iter_readelf(readelf: str, path: str) -> Iterable[str]:
     """Stream `readelf --debug-dump=info --wide` output for one path."""
-    args = ["readelf", "--debug-dump=info", "--wide", path]
+    args = [readelf, "--debug-dump=info", "--wide", path]
     try:
         with subprocess.Popen(
             args,
@@ -597,8 +597,9 @@ class DwarfScanner:
     than a collection of generic helper calls.
     """
 
-    def __init__(self, normalize_clones: bool):
+    def __init__(self, normalize_clones: bool, readelf: str):
         self.normalize_clones = normalize_clones
+        self.readelf = readelf
         self.die_by_offset: DieMap = {}
         self.assembly_defined_names: Set[str] = set()
 
@@ -668,7 +669,7 @@ class DwarfScanner:
         current_cu_offset: Optional[int] = None
         dwarf_object_hint = normalize_object_path(path) if path.endswith(".o") else None
 
-        for line in iter_readelf(path):
+        for line in iter_readelf(self.readelf, path):
             header = DIE_RE.match(line)
             if header:
                 current_offset, current_cu_offset = self.start_die(
@@ -840,6 +841,7 @@ class DwarfScanner:
 def parse_dwarf_data(
     paths: Iterable[str],
     normalize_clones: bool,
+    readelf: str,
 ) -> DwarfParseResult:
     """
     Scan DWARF inputs and collect inline-callee relationships plus subprograms
@@ -852,7 +854,7 @@ def parse_dwarf_data(
       "surviving function" view during object resolution
     - function names whose DWARF provenance comes from assembler compile units
     """
-    scanner = DwarfScanner(normalize_clones)
+    scanner = DwarfScanner(normalize_clones, readelf)
     inlined_callers: Dict[FuncKey, Set[FuncKey]] = defaultdict(set)
     defined: Set[FuncKey] = set()
     final_defined: Set[FuncKey] = set()
@@ -941,6 +943,11 @@ def parse_args() -> argparse.Namespace:
             "are removed."
         ),
     )
+    parser.add_argument(
+        "--readelf",
+        default="readelf",
+        help="Readelf binary to use for DWARF parsing. Default: readelf",
+    )
     return parser.parse_args()
 
 
@@ -1012,6 +1019,7 @@ def main() -> int:
             dwarf_data = parse_dwarf_data(
                 args.dwarf,
                 args.normalize_clones,
+                args.readelf,
             )
 
         removed_entries = extract_functions(sys.stdin, args.normalize_clones, not args.quiet)
