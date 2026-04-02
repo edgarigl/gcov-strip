@@ -3,6 +3,10 @@ dumps
 *.o
 *.gcda
 *.gcno
+*.gcov
+*.pyc
+__pycache__/
+.pytest_cache/
 coverage*.html
 coverage*.css
 coverage*.js
@@ -13,3 +17,4 @@ coverage*.dat
 coverage*.cov
 coverage
 funcs-removed.cfg
+tests/cache/
