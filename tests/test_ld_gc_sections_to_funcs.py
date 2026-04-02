@@ -42,3 +42,23 @@ def test_matching_gcno_path_does_not_fall_back_to_basename(tmp_path):
     gcno_path.write_bytes(b"")
 
     assert module.matching_gcno_path(str(obj_path)) is None
+
+
+def test_parse_dwarf_data_accepts_dw_at_language_name(monkeypatch):
+    """Assembler detection should work when only `DW_AT_language_name` is present."""
+    module = load_script_module()
+
+    dwarf_lines = [
+        "<0><0>: Abbrev Number: 1 (DW_TAG_compile_unit)",
+        "    <1>   DW_AT_name        : asm.S",
+        "    <2>   DW_AT_language_name: GNU Assembler",
+        "<1><10>: Abbrev Number: 2 (DW_TAG_subprogram)",
+        "    <11>   DW_AT_name        : asm_func",
+        "    <12>   DW_AT_low_pc      : 0x0",
+    ]
+
+    monkeypatch.setattr(module, "iter_readelf", lambda _readelf, _path: dwarf_lines)
+
+    dwarf_data = module.parse_dwarf_data(["asm.o"], False, "readelf")
+
+    assert "asm_func" in dwarf_data.assembly_defined_names

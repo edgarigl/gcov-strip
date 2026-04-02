@@ -100,9 +100,10 @@ DWARF_NAME_RE = re.compile(r"DW_AT_name\s*:\s*(?P<value>.+)")
 # relative `DW_AT_name` source path can be turned back into a likely object/gcno
 # location.
 DWARF_COMP_DIR_RE = re.compile(r"DW_AT_comp_dir\s*:\s*(?P<value>.+)")
-# `DW_AT_language` lets us distinguish normal C compile units from assembler
-# units that may still carry DWARF subprograms even though no gcno file exists.
-DWARF_LANGUAGE_RE = re.compile(r"DW_AT_language\s*:\s*(?P<value>.+)")
+# `DW_AT_language` is the older language attribute, while newer DWARF can emit
+# `DW_AT_language_name`. Accept both named forms so assembler compile units are
+# still recognized when newer binutils start using the newer attribute spelling.
+DWARF_LANGUAGE_RE = re.compile(r"DW_AT_language(?:_name)?\s*:\s*(?P<value>.+)")
 # `DW_AT_linkage_name` / `DW_AT_MIPS_linkage_name` carry the linker-visible
 # symbol name when the plain source-level `DW_AT_name` is not unique enough.
 DWARF_LINKAGE_RE = re.compile(
