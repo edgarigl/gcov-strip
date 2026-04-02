@@ -14,6 +14,7 @@ LDFLAGS += -coverage
 LDFLAGS += -Wl,--gc-sections -Wl,--print-gc-sections
 TARGET = ctest
 OBJS = ctest.o foo.o bar.o
+GCC_VERSIONS ?= 9 10 11 12 13 14 15 16 17 18 19 20
 
 ASFLAGS = -static -nostdlib -nostartfiles
 
@@ -38,13 +39,21 @@ check:
 	$(MAKE) test
 
 check-gcc-matrix:
-	for v in 9 10 11 12 13 14; do \
+	@for v in $(GCC_VERSIONS); do \
+		if ! command -v gcc-$$v >/dev/null 2>&1 || \
+		   ! command -v gcov-$$v >/dev/null 2>&1; then \
+			continue; \
+		fi; \
 		$(MAKE) clean >/dev/null && \
 		CC=gcc-$$v GCOV=gcov-$$v $(MAKE) run || exit 1; \
 	done
 
 check-dwarf-matrix:
-	for gcc_v in 9 10 11 12 13 14; do \
+	@for gcc_v in $(GCC_VERSIONS); do \
+		if ! command -v gcc-$$gcc_v >/dev/null 2>&1 || \
+		   ! command -v gcov-$$gcc_v >/dev/null 2>&1; then \
+			continue; \
+		fi; \
 		for dwarf_v in 2 3 4 5; do \
 			echo "== gcc-$$gcc_v -gdwarf-$$dwarf_v =="; \
 			$(MAKE) clean >/dev/null; \
@@ -63,8 +72,12 @@ check-dwarf-matrix:
 	done
 
 check-dwarf-consistency:
-	for gcc_v in 9 10 11 12 13 14; do \
+	@for gcc_v in $(GCC_VERSIONS); do \
 		base_cfg=/tmp/funcs-removed-gcc-$$gcc_v-dwarf-5.cfg; \
+		if ! command -v gcc-$$gcc_v >/dev/null 2>&1 || \
+		   ! command -v gcov-$$gcc_v >/dev/null 2>&1; then \
+			continue; \
+		fi; \
 		echo "== gcc-$$gcc_v dwarf consistency =="; \
 		$(MAKE) clean >/dev/null; \
 		CC=gcc-$$gcc_v GCOV=gcov-$$gcc_v \
