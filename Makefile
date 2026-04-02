@@ -107,6 +107,36 @@ check-dwarf-consistency:
 				exit 1; \
 			fi; \
 		done; \
+		for variant in 5-gdwarf64 5-gdwarf64-gno-strict-dwarf; do \
+			cfg=/tmp/funcs-removed-gcc-$$gcc_v-dwarf-$$variant.cfg; \
+			case "$$variant" in \
+				5-gdwarf64) \
+					variant_flags="$(CFLAGS) -gdwarf-5 -gdwarf64"; \
+					variant_name="-gdwarf-5 -gdwarf64"; \
+					;; \
+				5-gdwarf64-gno-strict-dwarf) \
+					variant_flags="$(CFLAGS) -gdwarf-5 -gdwarf64 -gno-strict-dwarf"; \
+					variant_name="-gdwarf-5 -gdwarf64 -gno-strict-dwarf"; \
+					;; \
+			esac; \
+			$(MAKE) clean >/dev/null; \
+			if ! CC=gcc-$$gcc_v GCOV=gcov-$$gcc_v \
+				CFLAGS="$$variant_flags" \
+				$(MAKE) $(TARGET) >/tmp/check-dwarf-consistency-$$gcc_v-$$variant.log 2>&1; then \
+				if grep -Eq "unrecognized .*gdwarf64|dwarf64.*not supported|sorry, unimplemented: 64-bit DWARF" \
+					/tmp/check-dwarf-consistency-$$gcc_v-$$variant.log; then \
+					echo "skip gcc-$$gcc_v $$variant_name"; \
+					continue; \
+				fi; \
+				cat /tmp/check-dwarf-consistency-$$gcc_v-$$variant.log; \
+				exit 1; \
+			fi; \
+			cp funcs-removed.cfg $$cfg; \
+			if ! diff -u $$base_cfg $$cfg; then \
+				echo "DWARF config mismatch for gcc-$$gcc_v: -gdwarf-5 vs $$variant_name"; \
+				exit 1; \
+			fi; \
+		done; \
 	done
 
 check-all: check check-gcc-matrix check-dwarf-matrix check-dwarf-consistency
