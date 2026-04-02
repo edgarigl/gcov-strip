@@ -16,7 +16,7 @@ LDFLAGS += -Wl,--gc-sections -Wl,--print-gc-sections
 TARGET = ctest
 OBJS = ctest.o foo.o bar.o
 GCC_VERSIONS ?= 9 10 11 12 13 14 15 16 17 18 19 20
-BINUTILS_VERSIONS ?= 2.42 2.43 2.44
+BINUTILS_VERSIONS ?= 2.42 2.43.1 2.44 2.45 2.46.0
 READELF_VARIANTS ?= g gno-strict-dwarf 2 3 4 5 5-gno-strict-dwarf 5-gdwarf64 5-gdwarf64-gno-strict-dwarf
 
 ASFLAGS = -static -nostdlib -nostartfiles

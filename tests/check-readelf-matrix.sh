@@ -7,71 +7,14 @@ BUILD_DIR="${BUILD_DIR:-$ROOT/tests/cache/build}"
 INSTALL_DIR="${INSTALL_DIR:-$ROOT/tests/cache/binutils}"
 DOWNLOAD_URL_BASE="${DOWNLOAD_URL_BASE:-https://ftp.gnu.org/gnu/binutils}"
 GCC_VERSIONS="${GCC_VERSIONS-9 10 11 12 13 14 15 16 17 18 19 20}"
-BINUTILS_VERSIONS="${BINUTILS_VERSIONS-2.42 2.43 2.44}"
+BINUTILS_VERSIONS="${BINUTILS_VERSIONS-2.42 2.43.1 2.44 2.45 2.46.0}"
 VARIANTS="${VARIANTS-5}"
 BASELINE_READELF="${BASELINE_READELF-readelf}"
 BASELINE_NAME="${BASELINE_NAME-host}"
 REFERENCE_GCC_VERSION="${REFERENCE_GCC_VERSION-}"
 REFERENCE_VARIANT="${REFERENCE_VARIANT-5}"
 JOBS="${JOBS-$(nproc)}"
-
-
-download_file() {
-    local url="$1"
-    local output="$2"
-
-    if command -v curl >/dev/null 2>&1; then
-        curl -L --fail -o "$output" "$url"
-        return
-    fi
-
-    wget -O "$output" "$url"
-}
-
-
-build_readelf() {
-    local version="$1"
-    local tarball="$SRC_DIR/binutils-$version.tar.xz"
-    local source_dir="$SRC_DIR/binutils-$version"
-    local build_dir="$BUILD_DIR/binutils-$version"
-    local prefix="$INSTALL_DIR/$version"
-    local readelf_bin="$prefix/bin/readelf"
-
-    if [ -x "$readelf_bin" ]; then
-        echo "reusing binutils-$version" >&2
-        printf '%s\n' "$readelf_bin"
-        return
-    fi
-
-    mkdir -p "$SRC_DIR" "$BUILD_DIR" "$INSTALL_DIR"
-
-    if [ ! -f "$tarball" ]; then
-        echo "downloading binutils-$version" >&2
-        download_file "$DOWNLOAD_URL_BASE/binutils-$version.tar.xz" "$tarball"
-    fi
-
-    if [ ! -d "$source_dir" ]; then
-        tar -xf "$tarball" -C "$SRC_DIR"
-    fi
-
-    rm -rf "$build_dir"
-    mkdir -p "$build_dir"
-    echo "building binutils-$version" >&2
-
-    (
-        cd "$build_dir"
-        "$source_dir/configure" \
-            --prefix="$prefix" \
-            --disable-nls \
-            --disable-werror \
-            --enable-deterministic-archives
-        make -j"$JOBS" all-binutils
-        make install-binutils
-    )
-
-    printf '%s\n' "$readelf_bin"
-}
-
+PREP_JOBS="${PREP_JOBS-2}"
 
 run_matrix_case() {
     local gcc_version="$1"
@@ -180,10 +123,19 @@ find_reference_gcc_version() {
 }
 
 
-echo "== preparing readelf set ==" >&2
-for binutils_version in $BINUTILS_VERSIONS; do
-    build_readelf "$binutils_version" >/dev/null
-done
+if [ -n "$BINUTILS_VERSIONS" ]; then
+    echo "== preparing readelf set ==" >&2
+    make \
+        -f "$ROOT/tests/binutils-cache.mk" \
+        -j"$PREP_JOBS" \
+        SRC_DIR="$SRC_DIR" \
+        BUILD_DIR="$BUILD_DIR" \
+        INSTALL_DIR="$INSTALL_DIR" \
+        DOWNLOAD_URL_BASE="$DOWNLOAD_URL_BASE" \
+        BINUTILS_VERSIONS="$BINUTILS_VERSIONS" \
+        BUILD_JOBS="$JOBS" \
+        all
+fi
 
 if [ -n "$REFERENCE_GCC_VERSION" ]; then
     global_reference_gcc="$REFERENCE_GCC_VERSION"
