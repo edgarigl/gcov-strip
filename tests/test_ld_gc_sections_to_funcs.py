@@ -29,8 +29,6 @@ def test_parse_args_normalizes_clones_by_default(monkeypatch):
         ["ld-gc-sections-to-funcs", "--no-normalize-clones"],
     )
     assert module.parse_args().normalize_clones is False
-
-
 def test_parse_text_section_name_keeps_clone_removals():
     """Clone-suffixed discarded sections should still map back to the base name."""
     module = load_script_module()

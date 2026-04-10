@@ -914,16 +914,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Extract removed function names from ld --print-gc-sections output."
     )
-    parser.add_argument(
-        "-n",
-        "--normalize-clones",
-        action="store_true",
-        default=True,
-        help=(
-            "Normalize GCC clone suffixes like .constprop/.isra/.part/.clone/.cold "
-            "(default: enabled)."
-        ),
-    )
+    parser.set_defaults(normalize_clones=True)
     parser.add_argument(
         "--no-normalize-clones",
         dest="normalize_clones",
