@@ -45,6 +45,7 @@ def test_parse_text_section_name_keeps_clone_removals():
         == "do_deprecated_hypercall"
     )
     assert module.parse_text_section_name(".text.foo.part.7", True) == "foo"
+    assert module.parse_text_section_name(".text.foo.cold", True) == "foo"
     assert (
         module.parse_text_section_name(".text.unlikely.foo.constprop.0", True)
         == "foo"

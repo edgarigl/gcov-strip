@@ -86,6 +86,7 @@ CLONE_SUFFIXES = (
     "isra",
     "part",
     "clone",
+    "cold",
 )
 CLONE_RE = re.compile(
     rf"^(?P<base>.+?)\.(?:{'|'.join(CLONE_SUFFIXES)})(?:\.\d+)?$"
@@ -168,16 +169,21 @@ def parse_text_section_name(
 
     suffix = section[len(".text.") :]
     parts = suffix.split(".")
+
+    if normalize_clones:
+        candidates = [suffix]
+        if len(parts) > 1:
+            candidates.append(".".join(parts[1:]))
+
+        for candidate in candidates:
+            name = normalize_name(candidate, True)
+            if "." not in name:
+                return name
+
     if len(parts) == 1:
         name = parts[0]
     elif len(parts) == 2:
         _, name = parts
-    elif normalize_clones:
-        for candidate in (suffix, ".".join(parts[1:])):
-            name = normalize_name(candidate, True)
-            if "." not in name:
-                return name
-        return None
     else:
         return None
 
