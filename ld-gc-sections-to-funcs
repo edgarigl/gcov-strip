@@ -912,7 +912,17 @@ def parse_args() -> argparse.Namespace:
         "-n",
         "--normalize-clones",
         action="store_true",
-        help="Normalize GCC clone suffixes like .constprop/.isra/.part/.clone.",
+        default=True,
+        help=(
+            "Normalize GCC clone suffixes like .constprop/.isra/.part/.clone/.cold "
+            "(default: enabled)."
+        ),
+    )
+    parser.add_argument(
+        "--no-normalize-clones",
+        dest="normalize_clones",
+        action="store_false",
+        help="Keep GCC clone suffixes like .isra.0 in emitted names.",
     )
     parser.add_argument(
         "-q",
