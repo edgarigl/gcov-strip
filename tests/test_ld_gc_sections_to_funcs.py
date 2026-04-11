@@ -2,8 +2,8 @@
 
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
+from collections import defaultdict
 from pathlib import Path
-import sys
 
 
 def load_script_module():
@@ -16,45 +16,39 @@ def load_script_module():
     return module
 
 
-def test_parse_args_normalizes_clones_by_default(monkeypatch):
-    """Clone normalization should be enabled unless explicitly disabled."""
-    module = load_script_module()
-
-    monkeypatch.setattr(sys, "argv", ["ld-gc-sections-to-funcs"])
-    assert module.parse_args().normalize_clones is True
-
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["ld-gc-sections-to-funcs", "--no-normalize-clones"],
-    )
-    assert module.parse_args().normalize_clones is False
 def test_parse_text_section_name_keeps_clone_removals():
-    """Clone-suffixed discarded sections should still map back to the base name."""
+    """Clone-suffixed discarded sections should keep their raw symbol spelling."""
     module = load_script_module()
 
-    assert module.parse_text_section_name(".text.foo.constprop.0", True) == "foo"
-    assert module.parse_text_section_name(".text.foo.isra.3", True) == "foo"
+    assert module.parse_text_section_name(".text.foo.constprop.0") == "foo.constprop.0"
+    assert module.parse_text_section_name(".text.foo.isra.3") == "foo.isra.3"
     assert (
         module.parse_text_section_name(
             ".text.do_deprecated_hypercall.isra.0",
-            True,
         )
-        == "do_deprecated_hypercall"
+        == "do_deprecated_hypercall.isra.0"
     )
-    assert module.parse_text_section_name(".text.foo.part.7", True) == "foo"
-    assert module.parse_text_section_name(".text.foo.cold", True) == "foo"
+    assert module.parse_text_section_name(".text.foo.part.7") == "foo.part.7"
+    assert module.parse_text_section_name(".text.foo.cold") == "foo.cold"
     assert (
-        module.parse_text_section_name(".text.unlikely.foo.constprop.0", True)
-        == "foo"
+        module.parse_text_section_name(".text.unlikely.foo.constprop.0")
+        == "foo.constprop.0"
     )
     assert (
         module.parse_text_section_name(
             ".text.unlikely.__dt_translate_address.constprop.0",
-            True,
         )
-        == "__dt_translate_address"
+        == "__dt_translate_address.constprop.0"
     )
+
+
+def test_normalize_name_strips_stacked_clone_suffixes():
+    """Normalization should collapse repeated clone passes to one base name."""
+    module = load_script_module()
+
+    assert module.normalize_name("foo.constprop.0") == "foo"
+    assert module.normalize_name("foo.constprop.0.isra.3") == "foo"
+    assert module.normalize_name("foo.part.1.clone.2.cold") == "foo"
 
 
 def test_matching_gcno_path_does_not_fall_back_to_basename(tmp_path):
@@ -89,6 +83,86 @@ def test_parse_dwarf_data_accepts_dw_at_language_name(monkeypatch):
 
     monkeypatch.setattr(module, "iter_readelf", lambda _readelf, _path: dwarf_lines)
 
-    dwarf_data = module.parse_dwarf_data(["asm.o"], False, "readelf")
+    dwarf_data = module.parse_dwarf_data(["asm.o"], "readelf")
 
     assert "asm_func" in dwarf_data.assembly_defined_names
+
+
+def test_resolve_removed_entries_skips_partial_clone_removals(monkeypatch):
+    """Removing one clone must not strip coverage for a live sibling body."""
+    module = load_script_module()
+
+    monkeypatch.setattr(module, "matching_gcno_path", lambda path: path.replace(".o", ".gcno"))
+    monkeypatch.setattr(
+        module,
+        "build_symbol_indexes",
+        lambda _root, _names: (
+            defaultdict(set),
+            defaultdict(set),
+            defaultdict(
+                lambda: defaultdict(set),
+                {
+                    "lib.o": defaultdict(
+                        set,
+                        {
+                            "helper": {"helper", "helper.constprop.0"},
+                        },
+                    ),
+                },
+            ),
+        ),
+    )
+
+    lines, warnings, review_lines = module.resolve_removed_entries(
+        [module.RemovalEntry("helper", "lib.o", "helper.constprop.0")],
+        False,
+    )
+
+    assert lines == []
+    assert warnings == [
+        "Skipping gcno removal for helper from lib.o: removed bodies "
+        "(helper.constprop.0) still share coverage with live bodies (helper)"
+    ]
+    assert review_lines == [
+        "# INFO skipped clone-only removal for helper from lib.o",
+        "# reason: live out-of-line body still present",
+        "# removed bodies: helper.constprop.0",
+        "# remaining bodies: helper",
+        "# helper",
+        "",
+    ]
+
+
+def test_resolve_removed_entries_keeps_clone_only_body_when_it_is_unique(monkeypatch):
+    """A cloned body can still own the only gcov-covered implementation."""
+    module = load_script_module()
+
+    monkeypatch.setattr(module, "matching_gcno_path", lambda path: path.replace(".o", ".gcno"))
+    monkeypatch.setattr(
+        module,
+        "build_symbol_indexes",
+        lambda _root, _names: (
+            defaultdict(set),
+            defaultdict(set),
+            defaultdict(
+                lambda: defaultdict(set),
+                {
+                    "lib.o": defaultdict(
+                        set,
+                        {
+                            "helper": {"helper.constprop.0"},
+                        },
+                    ),
+                },
+            ),
+        ),
+    )
+
+    lines, warnings, review_lines = module.resolve_removed_entries(
+        [module.RemovalEntry("helper", "lib.o", "helper.constprop.0")],
+        False,
+    )
+
+    assert lines == ["lib.o:helper"]
+    assert warnings == []
+    assert review_lines == []

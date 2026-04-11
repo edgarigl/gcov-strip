@@ -7,7 +7,7 @@
 #
 # The basic flow is:
 # - scan linker stderr for discarded `.text.<function>` sections
-# - optionally normalize GCC clone suffixes so names line up with gcov notes
+# - normalize GCC clone suffixes so linker, DWARF, and gcov names line up
 # - optionally inspect DWARF to find inline-only callees whose out-of-line body
 #   disappeared once all callers were garbage-collected
 # - write the final function list to stdout or a config file consumed by
@@ -39,6 +39,19 @@ from typing import DefaultDict, Dict, Iterable, List, NamedTuple, Optional, Set,
 FuncKey = Tuple[str, Optional[str]]
 SymbolIndex = DefaultDict[str, Set[str]]
 
+# BodyIndex is onceptually:
+# {
+#     "lib.o": {
+#         "helper": {"helper", "helper.constprop.0"},
+#     },
+# }
+#
+# The outer key is the object file, the inner key is the normalized gcov
+# function identity, and the set contains every raw emitted body name that
+# contributes to that identity. This lets the resolver skip gcno stripping
+# when a removed clone still shares coverage with another live body.
+BodyIndex = DefaultDict[str, DefaultDict[str, Set[str]]]
+
 
 @dataclass
 # pylint: disable=too-many-instance-attributes
@@ -57,6 +70,15 @@ class Die:
     cu_comp_dir: Optional[str] = None   # compile-unit working dir
     cu_language: Optional[str] = None   # compile-unit language string
     dwarf_object: Optional[str] = None  # scanned leaf-object path
+
+
+@dataclass(frozen=True)
+class RemovalEntry:
+    """One removed text body plus the normalized gcov identity it maps to."""
+
+    name: str
+    obj_path: Optional[str]
+    symbol_name: str
 
 
 DieMap = Dict[int, Die]
@@ -130,16 +152,16 @@ NM_LINE_RE = re.compile(
     r"^(?:[0-9A-Fa-f]+\s+)?(?P<type>[A-Za-z])\s+(?P<name>\S+)$"
 )
 NM_BATCH_SIZE = 64
+TEXT_SECTION_PREFIXES = ("unlikely", "startup", "hot", "exit")
 
 
 def extract_functions(
     lines: Iterable[str],
-    normalize_clones: bool,
     echo_stderr: bool,
-) -> List[FuncKey]:
-    """Extract unique `(function, object)` removals from linker output."""
-    functions: List[FuncKey] = []
-    seen: Set[FuncKey] = set()
+) -> List[RemovalEntry]:
+    """Extract unique removed text bodies from linker output."""
+    functions: List[RemovalEntry] = []
+    seen: Set[RemovalEntry] = set()
     for line in lines:
         if echo_stderr:
             sys.stderr.write(line)
@@ -149,10 +171,14 @@ def extract_functions(
             continue
 
         section, obj_path = match.groups()
-        name = parse_text_section_name(section, normalize_clones)
-        if name is None:
+        symbol_name = parse_text_section_name(section)
+        if symbol_name is None:
             continue
-        entry = (name, normalize_object_path(obj_path))
+        entry = RemovalEntry(
+            normalize_name(symbol_name),
+            normalize_object_path(obj_path),
+            symbol_name,
+        )
         if entry not in seen:
             seen.add(entry)
             functions.append(entry)
@@ -161,33 +187,21 @@ def extract_functions(
 
 def parse_text_section_name(
     section: str,
-    normalize_clones: bool,
 ) -> Optional[str]:
-    """Parse `.text` section names conservatively into function names."""
+    """Parse `.text` section names conservatively into raw symbol names."""
     if not section.startswith(".text."):
         return None
 
-    suffix = section[len(".text.") :]
-    parts = suffix.split(".")
+    parts = clean_name(section[len(".text.") :]).split(".")
+    while len(parts) > 1 and parts[0] in TEXT_SECTION_PREFIXES:
+        parts = parts[1:]
 
-    if normalize_clones:
-        candidates = [suffix]
-        if len(parts) > 1:
-            candidates.append(".".join(parts[1:]))
-
-        for candidate in candidates:
-            name = normalize_name(candidate, True)
-            if "." not in name:
-                return name
-
-    if len(parts) == 1:
-        name = parts[0]
-    elif len(parts) == 2:
-        _, name = parts
-    else:
+    name = ".".join(parts)
+    if not name:
         return None
-
-    return normalize_name(name, normalize_clones)
+    if "." in normalize_name(name):
+        return None
+    return clean_name(name)
 
 
 def normalize_object_path(path: str) -> str:
@@ -268,11 +282,11 @@ def iter_nm_symbols(output: str) -> Iterable[Tuple[str, str, str]]:
 def build_symbol_indexes(
     root: str,
     interesting_names: Set[str],
-    normalize_clones: bool,
-) -> Tuple[SymbolIndex, SymbolIndex]:
-    """Build gcno-backed and all-leaf `function -> objects` indexes in one pass."""
+) -> Tuple[SymbolIndex, SymbolIndex, BodyIndex]:
+    """Build object indexes for normalized names and their raw emitted bodies."""
     gcno_backed: SymbolIndex = defaultdict(set)
     all_leaf: SymbolIndex = defaultdict(set)
+    bodies_by_object: BodyIndex = defaultdict(lambda: defaultdict(set))
 
     object_paths = list(iter_object_files(root))
     has_gcno_by_object = {
@@ -282,6 +296,24 @@ def build_symbol_indexes(
         for obj_path in object_paths
     }
     seen_by_object: DefaultDict[str, Set[str]] = defaultdict(set)
+
+    def index_symbol(rel_path: str, symbol_name: str) -> None:
+        """Record one emitted symbol in the normalized object indexes."""
+        raw_name = clean_name(symbol_name)
+        if raw_name.startswith("."):
+            return
+
+        name = normalize_name(raw_name)
+        if name not in interesting_names or name in seen_by_object[rel_path]:
+            if name in interesting_names:
+                bodies_by_object[rel_path][name].add(raw_name)
+            return
+
+        all_leaf[name].add(rel_path)
+        if has_gcno_by_object.get(rel_path, False):
+            gcno_backed[name].add(rel_path)
+        seen_by_object[rel_path].add(name)
+        bodies_by_object[rel_path][name].add(raw_name)
 
     for batch in batched(object_paths, NM_BATCH_SIZE):
         try:
@@ -297,25 +329,28 @@ def build_symbol_indexes(
         for rel_path, symbol_type, symbol_name in iter_nm_symbols(output):
             if symbol_type not in {"T", "t", "W", "w"}:
                 continue
-
-            name = normalize_name(symbol_name, normalize_clones)
-            if name not in interesting_names or name in seen_by_object[rel_path]:
-                continue
-
-            all_leaf[name].add(rel_path)
-            if has_gcno_by_object.get(rel_path, False):
-                gcno_backed[name].add(rel_path)
-            seen_by_object[rel_path].add(name)
-    return gcno_backed, all_leaf
+            index_symbol(rel_path, symbol_name)
+    return gcno_backed, all_leaf, bodies_by_object
 
 
-def build_removed_object_set(removed_entries: List[FuncKey]) -> Set[str]:
+def build_removed_object_set(removed_entries: List[RemovalEntry]) -> Set[str]:
     """Return leaf objects that already appear in linker removals."""
     removed_objects: Set[str] = set()
-    for _, obj_path in removed_entries:
+    for entry in removed_entries:
+        obj_path = entry.obj_path
         if obj_path and matching_gcno_path(obj_path):
             removed_objects.add(obj_path)
     return removed_objects
+
+
+def build_removed_body_index(removed_entries: List[RemovalEntry]) -> BodyIndex:
+    """Index removed raw bodies as `object -> normalized function -> raw bodies`."""
+    removed_bodies: BodyIndex = defaultdict(lambda: defaultdict(set))
+    for entry in removed_entries:
+        if entry.obj_path is None:
+            continue
+        removed_bodies[entry.obj_path][entry.name].add(entry.symbol_name)
+    return removed_bodies
 
 
 def build_surviving_symbol_index(defined_functions: Set[FuncKey]) -> SymbolIndex:
@@ -361,19 +396,22 @@ class RemovalResolver:
 
     def __init__(
         self,
-        removed_entries: List[FuncKey],
-        normalize_clones: bool,
+        removed_entries: List[RemovalEntry],
         strict: bool,
         dwarf_state: Optional[DwarfResolutionState] = None,
     ):
         """Build the indexes needed to scope removals to leaf objects."""
         dwarf_state = dwarf_state or DwarfResolutionState(set(), set())
         self.strict = strict
-        self.gcno_symbol_index, self.leaf_symbol_index = build_symbol_indexes(
+        (
+            self.gcno_symbol_index,
+            self.leaf_symbol_index,
+            self.object_bodies,
+        ) = build_symbol_indexes(
             os.getcwd(),
-            {name for name, _ in removed_entries},
-            normalize_clones,
+            {entry.name for entry in removed_entries},
         )
+        self.removed_bodies = build_removed_body_index(removed_entries)
         self.removed_objects = build_removed_object_set(removed_entries)
         self.surviving_symbols = build_surviving_symbol_index(
             dwarf_state.final_defined_functions
@@ -394,12 +432,13 @@ class RemovalResolver:
 
     def resolve_one(
         self,
-        name: str,
-        obj_path: Optional[str],
+        entry: RemovalEntry,
     ) -> Tuple[List[str], List[str], List[str]]:
         """Turn one removed function into config lines, warnings, and reviews."""
+        name = entry.name
+        obj_path = entry.obj_path
         if obj_path and matching_gcno_path(obj_path):
-            return [f"{obj_path}:{name}"], [], []
+            return self.resolve_gcno_entry(name, obj_path)
 
         leaf_objects = sorted(self.gcno_symbol_index.get(name, set()))
         chosen_object, candidate_objects = pick_leaf_object(
@@ -410,7 +449,7 @@ class RemovalResolver:
         )
 
         if chosen_object is not None:
-            return [f"{chosen_object}:{name}"], [], []
+            return self.resolve_gcno_entry(name, chosen_object)
 
         if candidate_objects:
             return self.ambiguous_result(name, obj_path, candidate_objects)
@@ -494,10 +533,47 @@ class RemovalResolver:
         )
         return [], warnings, review_lines
 
+    def resolve_gcno_entry(
+        self,
+        name: str,
+        obj_path: str,
+    ) -> Tuple[List[str], List[str], List[str]]:
+        """Resolve one removal for an object that already has a matching gcno."""
+        defined_bodies = self.object_bodies.get(obj_path, {}).get(name, set())
+        if not defined_bodies:
+            return [f"{obj_path}:{name}"], [], []
+
+        removed_bodies = self.removed_bodies.get(obj_path, {}).get(name, set())
+        if len(defined_bodies) == 1:
+            return [f"{obj_path}:{name}"], [], []
+
+        if defined_bodies.issubset(removed_bodies):
+            return [f"{obj_path}:{name}"], [], []
+
+        remaining_bodies = sorted(defined_bodies - removed_bodies)
+        removed_body_list = sorted(removed_bodies) or ["unknown"]
+        warnings = [
+            f"Skipping gcno removal for {name} from {obj_path}: "
+            f"removed bodies ({', '.join(removed_body_list)}) still share "
+            f"coverage with live bodies ({', '.join(remaining_bodies)})"
+        ]
+        if self.strict:
+            return [], warnings, []
+        review_lines = self.format_review_block(
+            "# INFO skipped clone-only removal for "
+            f"{name} from {obj_path}",
+            [
+                "# reason: live out-of-line body still present",
+                f"# removed bodies: {', '.join(removed_body_list)}",
+                f"# remaining bodies: {', '.join(remaining_bodies)}",
+            ],
+            name,
+        )
+        return [], warnings, review_lines
+
 
 def resolve_removed_entries(
-    removed_entries: List[FuncKey],
-    normalize_clones: bool,
+    removed_entries: List[RemovalEntry],
     strict: bool,
     dwarf_state: Optional[DwarfResolutionState] = None,
 ) -> Tuple[List[str], List[str], List[str]]:
@@ -516,7 +592,6 @@ def resolve_removed_entries(
     #
     resolver = RemovalResolver(
         removed_entries,
-        normalize_clones,
         strict,
         dwarf_state,
     )
@@ -526,11 +601,8 @@ def resolve_removed_entries(
     review_lines: List[str] = []
     seen_lines: Set[str] = set()
 
-    for name, obj_path in removed_entries:
-        candidate_lines, entry_warnings, entry_review_lines = resolver.resolve_one(
-            name,
-            obj_path,
-        )
+    for entry in removed_entries:
+        candidate_lines, entry_warnings, entry_review_lines = resolver.resolve_one(entry)
         warnings.extend(entry_warnings)
         review_lines.extend(entry_review_lines)
 
@@ -546,15 +618,20 @@ def resolve_removed_entries(
     return resolved_lines, warnings, review_lines
 
 
-def normalize_name(name: str, normalize_clones: bool) -> str:
-    """Normalize a name so linker, DWARF, and gcov forms line up."""
+def clean_name(name: str) -> str:
+    """Drop linker/readelf punctuation that is not part of the symbol identity."""
     name = name.rstrip(".,")
-    name = re.sub(r"/\d+$", "", name)
-    if normalize_clones:
+    return re.sub(r"/\d+$", "", name)
+
+
+def normalize_name(name: str) -> str:
+    """Normalize a name so linker, DWARF, and gcov forms line up."""
+    name = clean_name(name)
+    while True:
         clone_match = CLONE_RE.match(name)
-        if clone_match:
-            name = clone_match.group("base")
-    return name
+        if not clone_match:
+            return name
+        name = clone_match.group("base")
 
 
 def parse_object_scoped_entry(line: str) -> FuncKey:
@@ -599,13 +676,12 @@ class DwarfScanner:
     """
     Small stateful DWARF scanner.
 
-    The class keeps the current DIE table and the clone-normalization setting in
-    one place so the inline-only inference reads more like a straight parser
-    than a collection of generic helper calls.
+    The class keeps the current DIE table in one place so the inline-only
+    inference reads more like a straight parser than a collection of generic
+    helper calls.
     """
 
-    def __init__(self, normalize_clones: bool, readelf: str):
-        self.normalize_clones = normalize_clones
+    def __init__(self, readelf: str):
         self.readelf = readelf
         self.die_by_offset: DieMap = {}
         self.assembly_defined_names: Set[str] = set()
@@ -649,7 +725,7 @@ class DwarfScanner:
 
         name = die.name or die.linkage_name
         if name:
-            return normalize_name(name, self.normalize_clones), self.object_hint(die)
+            return normalize_name(name), self.object_hint(die)
 
         if die.declaration is not None:
             resolved = self.resolve_identity(die.declaration, visited)
@@ -847,7 +923,6 @@ class DwarfScanner:
 
 def parse_dwarf_data(
     paths: Iterable[str],
-    normalize_clones: bool,
     readelf: str,
 ) -> DwarfParseResult:
     """
@@ -861,7 +936,7 @@ def parse_dwarf_data(
       "surviving function" view during object resolution
     - function names whose DWARF provenance comes from assembler compile units
     """
-    scanner = DwarfScanner(normalize_clones, readelf)
+    scanner = DwarfScanner(readelf)
     inlined_callers: Dict[FuncKey, Set[FuncKey]] = defaultdict(set)
     defined: Set[FuncKey] = set()
     final_defined: Set[FuncKey] = set()
@@ -913,13 +988,6 @@ def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description="Extract removed function names from ld --print-gc-sections output."
-    )
-    parser.set_defaults(normalize_clones=True)
-    parser.add_argument(
-        "--no-normalize-clones",
-        dest="normalize_clones",
-        action="store_false",
-        help="Keep GCC clone suffixes like .isra.0 in emitted names.",
     )
     parser.add_argument(
         "-q",
@@ -979,8 +1047,7 @@ def resolve_inline_only_removals(
         find_inline_only_functions(resolved_removals, inlined, defined)
     )
     return resolve_removed_entries(
-        inline_only_entries,
-        args.normalize_clones,
+        [RemovalEntry(name, obj_path, name) for name, obj_path in inline_only_entries],
         args.strict_object_match,
     )
 
@@ -1026,14 +1093,12 @@ def main() -> int:
         if args.dwarf:
             dwarf_data = parse_dwarf_data(
                 args.dwarf,
-                args.normalize_clones,
                 args.readelf,
             )
 
-        removed_entries = extract_functions(sys.stdin, args.normalize_clones, not args.quiet)
+        removed_entries = extract_functions(sys.stdin, not args.quiet)
         resolved_config_lines, warnings, review_lines = resolve_removed_entries(
             removed_entries,
-            args.normalize_clones,
             args.strict_object_match,
             DwarfResolutionState(
                 dwarf_data.final_defined_functions,
