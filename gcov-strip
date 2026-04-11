@@ -264,14 +264,13 @@ def rebuild_gcno(
         "removed_names": [],
         "removed_lines": [],
         "current_removed_lines": None,
-        "use_word_counts": use_word_counts,
     }
 
     for tag, payload in iter_gcno_records(data, prefix_end, use_word_counts):
         name = handle_function_record(
             tag,
             payload,
-            state,
+            use_word_counts,
         )
         if name is not None:
             state["drop_current"] = name in remove_functions
@@ -321,13 +320,13 @@ def rebuild_gcno(
 def handle_function_record(
     tag: int,
     payload: bytes,
-    state: Dict[str, object],
+    use_word_counts: bool,
 ) -> Optional[str]:
     """Return the function name when a new function record starts."""
     if tag != GCOV_TAG_FUNCTION:
         return None
 
-    return parse_function_name(payload, bool(state["use_word_counts"]))
+    return parse_function_name(payload, use_word_counts)
 
 
 def find_gcno_files(root: str) -> Iterable[str]:
