@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gcov-strip-tools"
+version = "0.0.1"
+description = "Standalone helpers for gcno stripping and ld --gc-sections analysis"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Edgar E. Iglesias" },
+]
+license = { text = "MIT" }
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+[tool.setuptools]
+script-files = [
+  "gcov-strip",
+  "ld-gc-sections-to-funcs",
+]

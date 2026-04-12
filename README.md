@@ -118,6 +118,27 @@ make clean && make run
 The `make` step already runs `gcov-strip` and prints any removed source
 lines. `make run` executes the binary and writes `coverage.html`.
 
+## Install
+
+The tools can be installed directly from a git URL while keeping the current
+command names:
+
+```bash
+pip install git+ssh://git@github.com/<owner>/<repo>.git
+```
+
+Developer mode:
+
+```bash
+git clone <repo-url>
+cd ctest
+pip install -e .
+```
+
+This packaging keeps `gcov-strip` and `ld-gc-sections-to-funcs` as standalone
+single-file scripts in the repo, so they can still be copied out and run
+directly.
+
 ## Testing
 
 The repo has three main test entry points:
