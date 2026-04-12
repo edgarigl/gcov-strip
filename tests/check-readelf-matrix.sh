@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+EXAMPLE_DIR="${EXAMPLE_DIR:-$ROOT/examples/minimal}"
 SRC_DIR="${SRC_DIR:-$ROOT/tests/cache/src}"
 BUILD_DIR="${BUILD_DIR:-$ROOT/tests/cache/build}"
 INSTALL_DIR="${INSTALL_DIR:-$ROOT/tests/cache/binutils}"
@@ -105,7 +106,7 @@ run_matrix_case() {
     CC="gcc-$gcc_version" GCOV="gcov-$gcc_version" READELF="$readelf_bin" \
         CFLAGS="$variant_flags" \
         make -C "$ROOT" ctest >"$log_path" 2>&1
-    cp "$ROOT/funcs-removed.cfg" "$output_cfg"
+    cp "$EXAMPLE_DIR/funcs-removed.cfg" "$output_cfg"
 }
 
 

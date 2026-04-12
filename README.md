@@ -11,6 +11,9 @@ This repo contains a minimal example project that:
 - runs `gcov-strip` to remove their notes
 - generates an HTML coverage report with `gcovr`
 
+The example sources and generated build artifacts live under
+`examples/minimal/`.
+
 ## How it works
 
 - `ld-gc-sections-to-funcs` parses the linker output and writes
@@ -46,8 +49,10 @@ The object resolution order is:
 If the linker drops inline-only functions, `ld-gc-sections-to-funcs` can
 scan DWARF info to detect them using `--dwarf`:
 
-```
-./ld-gc-sections-to-funcs -o funcs-removed.cfg --dwarf ctest
+```bash
+./ld-gc-sections-to-funcs \
+  -o examples/minimal/funcs-removed.cfg \
+  --dwarf examples/minimal/ctest
 ```
 
 Provide multiple `--dwarf` paths to scan several binaries or objects.
@@ -115,8 +120,8 @@ Build, run, and regenerate coverage output:
 make clean && make run
 ```
 
-The `make` step already runs `gcov-strip` and prints any removed source
-lines. `make run` executes the binary and writes `coverage.html`.
+The root `make` wrapper builds `examples/minimal/`, runs `gcov-strip`,
+and writes coverage output there.
 
 ## Install
 
@@ -168,8 +173,8 @@ Use `make help` to list the common targets.
 
 Strip functions listed in `funcs-removed.cfg` and print removed lines:
 
-```
-./gcov-strip -c funcs-removed.cfg --list-lines
+```bash
+./gcov-strip -c examples/minimal/funcs-removed.cfg --list-lines
 ```
 
 Use multiple `-c` options to combine several config files, and `--dry-run`

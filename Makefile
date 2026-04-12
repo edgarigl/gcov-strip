@@ -1,43 +1,26 @@
 #CROSS=$(HOME)/dev/bin/microblazeel-xilinx-elf-
 CC ?= $(CROSS)gcc
 GCOV ?= gcov
-GCOVR=gcovr --gcov-executable $(GCOV)
 READELF ?= readelf
 SHELL := /bin/bash
 
-CFLAGS = -Wall -O2 -g
-CFLAGS += -ffunction-sections
-#CFLAGS += -fdump-tree-all -fdump-ipa-all -dumpdir ./dumps/
-CFLAGS += -fprofile-arcs -ftest-coverage
-#CFLAGS += -fkeep-static-functions
-#CFLAGS += -fkeep-inline-functions
-#CFLAGS += -fno-inline
-LDFLAGS += -coverage
-LDFLAGS += -Wl,--gc-sections -Wl,--print-gc-sections
-TARGET = ctest
-OBJS = ctest.o foo.o bar.o
+EXAMPLE_DIR := examples/minimal
+TARGET := ctest
 GCC_VERSIONS ?= 9 10 11 12 13 14 15 16 17 18 19 20
 BINUTILS_VERSIONS ?= 2.26 2.30 2.34 2.42 2.43.1 2.44 2.45 2.46.0
 READELF_VARIANTS ?= g gno-strict-dwarf 2 3 4 5 5-gno-strict-dwarf 5-gdwarf64 5-gdwarf64-gno-strict-dwarf
 READELF_MATRIX_LOG ?= tests/cache/check-readelf-matrix.log
 
-ASFLAGS = -static -nostdlib -nostartfiles
+.PHONY: all $(TARGET) run test check check-gcc-matrix check-readelf-matrix check-all clean distclean help
 
-all: $(TARGET)
+all:
+	$(MAKE) -C $(EXAMPLE_DIR) ROOT=$(CURDIR) all
 
-.PHONY: all run test check check-gcc-matrix check-readelf-matrix check-all clean distclean help
+$(TARGET):
+	$(MAKE) -C $(EXAMPLE_DIR) ROOT=$(CURDIR) $(TARGET)
 
-$(OBJS): Makefile
-
-$(TARGET): $(OBJS)
-	$(LINK.o) $^ $(LOADLIBES) $(LDLIBS) -o $@ 2>&1 | \
-		./ld-gc-sections-to-funcs --readelf "$(READELF)" -o funcs-removed.cfg
-	./gcov-strip -c funcs-removed.cfg --verbose --list-lines
-
-run: $(TARGET)
-	./$(TARGET)
-	$(GCOVR) --html-details coverage.html --html-self-contained --decisions
-	$(GCOVR)
+run:
+	$(MAKE) -C $(EXAMPLE_DIR) ROOT=$(CURDIR) run
 
 test:
 	pytest -q
@@ -70,20 +53,20 @@ check-all: check check-gcc-matrix check-readelf-matrix
 help:
 	@printf '%s\n' \
 		"Targets:" \
-		"  make run                  Build, run, and generate coverage output" \
+		"  make run                  Build and run examples/minimal" \
 		"  make test                 Run pytest regression tests" \
 		"  make check                Run pylint and pytest" \
 		"  make check-gcc-matrix     Run the GCC coverage matrix" \
 		"  make check-readelf-matrix Run the GCC/DWARF/readelf matrix" \
 		"  make check-all            Run all checks" \
-		"  make clean                Remove build output and cached build dirs" \
+		"  make clean                Remove example build output and caches" \
 		"  make distclean            Also remove cached binutils downloads"
 
 clean:
+	$(MAKE) -C $(EXAMPLE_DIR) ROOT=$(CURDIR) clean
 	$(RM) -r dumps
 	$(RM) -r tests/cache/build
 	$(RM) funcs-removed.cfg
-	$(RM) $(OBJS) $(TARGET)
 	$(RM) *.gcda *.gcno *.gcov coverage*.html
 
 distclean: clean

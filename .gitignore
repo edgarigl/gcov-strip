@@ -18,3 +18,5 @@ coverage*.cov
 coverage
 funcs-removed.cfg
 tests/cache/
+build/
+*.egg-info/
