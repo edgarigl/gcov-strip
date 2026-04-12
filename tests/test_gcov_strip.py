@@ -1,6 +1,8 @@
 """Regression tests for gcov-strip."""
 
+import argparse
 import struct
+from collections import defaultdict
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
@@ -52,18 +54,28 @@ def build_function_payload(name, use_word_counts):
 
 def build_old_gcno(records):
     """Build one synthetic old-layout gcno file."""
+    return build_gcno(records, True)
+
+
+def build_gcno(records, use_word_counts):
+    """Build one synthetic gcno file for the selected record-length layout."""
     cwd = b"/tmp"
     cwd = cwd + b"\x00"
-    cwd = cwd.ljust((len(cwd) + 3) & ~3, b"\x00")
+    if use_word_counts:
+        cwd = cwd.ljust((len(cwd) + 3) & ~3, b"\x00")
+
     data = bytearray()
     data.extend(b"oncg")
-    data.extend(b"*51B")
-    data.extend(b"\x00" * 4)
-    data.extend(struct.pack("<I", len(cwd) // 4))
+    data.extend(b"*51B" if use_word_counts else b"*24B")
+    data.extend(b"\x00" * (4 if use_word_counts else 8))
+    if use_word_counts:
+        data.extend(struct.pack("<I", len(cwd) // 4))
+    else:
+        data.extend(struct.pack("<I", len(cwd)))
     data.extend(cwd)
     data.extend(struct.pack("<I", 1))
     for tag, payload in records:
-        data.extend(encode_record(tag, payload, True))
+        data.extend(encode_record(tag, payload, use_word_counts))
     return bytes(data)
 
 
@@ -95,6 +107,14 @@ def test_select_gcno_layout_supports_known_versions_and_newer_byte_layout(capsys
 
     with pytest.raises(ValueError):
         module.select_gcno_layout(b"bad!" + b"*24B" + b"\x00" * 8)
+
+
+def test_select_gcno_layout_rejects_older_unknown_versions():
+    """Unknown versions older than the byte-count baseline should still fail."""
+    module = load_script_module()
+
+    with pytest.raises(ValueError, match=r"unsupported gcno version B23\*"):
+        module.select_gcno_layout(b"oncg*32B" + b"\x00" * 8)
 
 
 def test_string_and_record_helpers_handle_old_and_new_layouts():
@@ -154,3 +174,149 @@ def test_rebuild_gcno_keeps_word_count_record_lengths():
 
     records = list(module.iter_gcno_records(updated, start, use_word_counts))
     assert [module.parse_function_name(payload, True) for tag, payload in records if tag == module.GCOV_TAG_FUNCTION] == ["foo"]
+
+
+def test_load_config_ignores_comments_and_normalizes_paths(tmp_path):
+    """Config loading should skip comments and fold equivalent object paths."""
+    module = load_script_module()
+
+    config_path = tmp_path / "funcs.cfg"
+    config_path.write_text(
+        "\n".join(
+            [
+                "# comment",
+                "",
+                "dir/../foo.o:bar",
+                "foo.o:baz",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert module.load_config(str(config_path)) == {"foo.o": {"bar", "baz"}}
+
+
+def test_process_file_dry_run_preserves_byte_count_gcno(tmp_path):
+    """Dry runs should report removals without rewriting newer gcno layouts."""
+    module = load_script_module()
+
+    foo_payload = build_function_payload("foo", False)
+    foo_lines = build_line_payload("foo.c", [1], False)
+    bar_payload = build_function_payload("bar", False)
+    bar_lines = build_line_payload("bar.c", [2], False)
+    original = build_gcno(
+        [
+            (module.GCOV_TAG_FUNCTION, foo_payload),
+            (module.GCOV_TAG_LINES, foo_lines),
+            (module.GCOV_TAG_FUNCTION, bar_payload),
+            (module.GCOV_TAG_LINES, bar_lines),
+        ],
+        False,
+    )
+    gcno_path = tmp_path / "foo.gcno"
+    gcno_path.write_bytes(original)
+
+    changed, removed, removed_names, removed_lines = module.process_file(
+        str(gcno_path),
+        {"bar"},
+        list_lines=True,
+        dry_run=True,
+    )
+
+    assert changed is True
+    assert removed == 1
+    assert removed_names == ["bar"]
+    assert removed_lines == [("bar", {"bar.c": {2}})]
+    assert gcno_path.read_bytes() == original
+
+
+def test_handle_gcno_file_skips_unrelated_gcno(tmp_path, monkeypatch):
+    """Unrelated gcno files should be skipped without touching process_file."""
+    module = load_script_module()
+
+    gcno_path = tmp_path / "foo.gcno"
+    gcno_path.write_bytes(b"")
+    args = argparse.Namespace(list_lines=False, dry_run=False, verbose=False)
+
+    monkeypatch.setattr(
+        module,
+        "process_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected call")),
+    )
+
+    changed, removed = module.handle_gcno_file(
+        str(gcno_path),
+        args,
+        defaultdict(set, {"bar.o": {"baz"}}),
+    )
+
+    assert (changed, removed) == (0, 0)
+
+
+def test_handle_gcno_file_reports_verbose_and_lines(monkeypatch, capsys):
+    """Verbose and line-list reporting should flow through one gcno handler."""
+    module = load_script_module()
+    args = argparse.Namespace(list_lines=True, dry_run=True, verbose=True)
+
+    monkeypatch.setattr(module, "gcno_object_paths", lambda _path: {"foo.o"})
+    monkeypatch.setattr(
+        module,
+        "process_file",
+        lambda *_args, **_kwargs: (
+            True,
+            1,
+            ["bar"],
+            [("bar", {"bar.c": {7}})],
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "print_removed_lines",
+        lambda path, removed_lines: print(f"lines {path} {removed_lines}"),
+    )
+
+    changed, removed = module.handle_gcno_file(
+        "foo.gcno",
+        args,
+        defaultdict(set, {"foo.o": {"bar"}}),
+    )
+
+    assert (changed, removed) == (1, 1)
+    captured = capsys.readouterr()
+    assert "removed bar from foo.gcno" in captured.out
+    assert "lines foo.gcno [('bar', {'bar.c': {7}})]" in captured.out
+
+
+def test_main_rewrites_matching_gcno_file(tmp_path, monkeypatch, capsys):
+    """Main should rewrite one matching gcno file from an on-disk config."""
+    module = load_script_module()
+
+    gcno_path = tmp_path / "foo.gcno"
+    config_path = tmp_path / "funcs.cfg"
+    original = build_gcno(
+        [
+            (module.GCOV_TAG_FUNCTION, build_function_payload("foo", False)),
+            (module.GCOV_TAG_LINES, build_line_payload("foo.c", [1], False)),
+            (module.GCOV_TAG_FUNCTION, build_function_payload("bar", False)),
+            (module.GCOV_TAG_LINES, build_line_payload("bar.c", [2], False)),
+        ],
+        False,
+    )
+    gcno_path.write_bytes(original)
+    config_path.write_text("foo.o:bar\n", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+
+    assert module.main(["-c", str(config_path)]) == 0
+    assert gcno_path.read_bytes() != original
+
+    use_word_counts = module.select_gcno_layout(gcno_path.read_bytes())
+    start = module.record_start_offset(gcno_path.read_bytes(), use_word_counts)
+    records = list(module.iter_gcno_records(gcno_path.read_bytes(), start, use_word_counts))
+    assert [
+        module.parse_function_name(payload, use_word_counts)
+        for tag, payload in records
+        if tag == module.GCOV_TAG_FUNCTION
+    ] == ["foo"]
+    assert "Processed 1 file(s); removed 1 function record(s)." in capsys.readouterr().out

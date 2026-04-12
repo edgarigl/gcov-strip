@@ -1,9 +1,15 @@
 """Regression tests for ld-gc-sections-to-funcs."""
 
+import io
+import sys
+from collections import defaultdict
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
-from collections import defaultdict
 from pathlib import Path
+
+import pytest
+
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
 def load_script_module():
@@ -49,6 +55,39 @@ def test_normalize_name_strips_stacked_clone_suffixes():
     assert module.normalize_name("foo.constprop.0") == "foo"
     assert module.normalize_name("foo.constprop.0.isra.3") == "foo"
     assert module.normalize_name("foo.part.1.clone.2.cold") == "foo"
+
+
+def test_extract_functions_from_fixture_log():
+    """Linker logs on disk should parse into raw removed-body entries."""
+    module = load_script_module()
+
+    log_path = FIXTURES_DIR / "ld" / "extract-removals.log"
+
+    entries = module.extract_functions(
+        log_path.read_text(encoding="utf-8").splitlines(True),
+        False,
+    )
+
+    assert entries == [
+        module.RemovalEntry("helper", "lib.o", "helper.constprop.0"),
+        module.RemovalEntry("helper", "lib.o", "helper"),
+        module.RemovalEntry("foo", "lib.o", "foo.constprop.0"),
+    ]
+
+
+def test_pick_leaf_object_prefers_remaining_non_survivor():
+    """A final-ELF survivor should let us pick the one removed candidate."""
+    module = load_script_module()
+
+    chosen, candidates = module.pick_leaf_object(
+        "merge",
+        ["a.o", "b.o"],
+        defaultdict(set, {"merge": {"a.o"}}),
+        set(),
+    )
+
+    assert chosen == "b.o"
+    assert candidates == ["b.o"]
 
 
 def test_matching_gcno_path_does_not_fall_back_to_basename(tmp_path):
@@ -166,3 +205,142 @@ def test_resolve_removed_entries_keeps_clone_only_body_when_it_is_unique(monkeyp
     assert lines == ["lib.o:helper"]
     assert warnings == []
     assert review_lines == []
+
+
+def test_resolve_removed_entries_reports_ambiguous_review(monkeypatch):
+    """Ambiguous same-name candidates should become a review block by default."""
+    module = load_script_module()
+
+    monkeypatch.setattr(
+        module,
+        "matching_gcno_path",
+        lambda path: {"a.o": "a.gcno", "b.o": "b.gcno"}.get(path),
+    )
+    monkeypatch.setattr(
+        module,
+        "build_symbol_indexes",
+        lambda _root, _names: (
+            defaultdict(set, {"merge": {"a.o", "b.o"}}),
+            defaultdict(set, {"merge": {"a.o", "b.o"}}),
+            defaultdict(lambda: defaultdict(set)),
+        ),
+    )
+
+    lines, warnings, review_lines = module.resolve_removed_entries(
+        [module.RemovalEntry("merge", "prelink.o", "merge")],
+        False,
+    )
+
+    assert lines == []
+    assert warnings == [
+        "Ambiguous removal for merge: prelink.o matches multiple leaf objects "
+        "(a.o, b.o)"
+    ]
+    assert review_lines == [
+        "# REVIEW ambiguous removal for merge from prelink.o",
+        "# candidates: a.o, b.o",
+        "# merge",
+        "",
+    ]
+
+
+def test_resolve_removed_entries_strict_raises_on_ambiguous(monkeypatch):
+    """Strict mode should fail instead of emitting a review block."""
+    module = load_script_module()
+
+    monkeypatch.setattr(
+        module,
+        "matching_gcno_path",
+        lambda path: {"a.o": "a.gcno", "b.o": "b.gcno"}.get(path),
+    )
+    monkeypatch.setattr(
+        module,
+        "build_symbol_indexes",
+        lambda _root, _names: (
+            defaultdict(set, {"merge": {"a.o", "b.o"}}),
+            defaultdict(set, {"merge": {"a.o", "b.o"}}),
+            defaultdict(lambda: defaultdict(set)),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="strict object matching failed"):
+        module.resolve_removed_entries(
+            [module.RemovalEntry("merge", "prelink.o", "merge")],
+            True,
+        )
+
+
+def test_resolve_removed_entries_reports_likely_no_coverage(monkeypatch):
+    """Leaf objects without gcno should become informational no-coverage notes."""
+    module = load_script_module()
+
+    monkeypatch.setattr(module, "matching_gcno_path", lambda _path: None)
+    monkeypatch.setattr(
+        module,
+        "build_symbol_indexes",
+        lambda _root, _names: (
+            defaultdict(set),
+            defaultdict(set, {"foo": {"arch/head.o"}}),
+            defaultdict(lambda: defaultdict(set)),
+        ),
+    )
+
+    lines, warnings, review_lines = module.resolve_removed_entries(
+        [module.RemovalEntry("foo", "prelink.o", "foo")],
+        False,
+        module.DwarfResolutionState(set(), {"foo"}),
+    )
+
+    assert lines == []
+    assert warnings == [
+        "foo from prelink.o only matches leaf objects without gcno or DWARF "
+        "function provenance (arch/head.o)"
+    ]
+    assert review_lines == [
+        "# INFO likely assembly/no-coverage removal for foo from prelink.o",
+        "# reason: no gcno coverage",
+        "# candidates: arch/head.o",
+        "# foo",
+        "",
+    ]
+
+
+def test_main_writes_clone_suppression_fixture(tmp_path, monkeypatch):
+    """The script should emit an explanatory info block for skipped clone removals."""
+    module = load_script_module()
+    log_path = FIXTURES_DIR / "ld" / "clone-only-removal.log"
+    expected_path = FIXTURES_DIR / "ld" / "clone-only-removal.expected"
+    output_path = tmp_path / "funcs-removed.cfg"
+
+    (tmp_path / "lib.gcno").write_bytes(b"")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        module,
+        "build_symbol_indexes",
+        lambda _root, _names: (
+            defaultdict(set),
+            defaultdict(set),
+            defaultdict(
+                lambda: defaultdict(set),
+                {
+                    "lib.o": defaultdict(
+                        set,
+                        {
+                            "helper": {"helper", "helper.constprop.0"},
+                        },
+                    ),
+                },
+            ),
+        ),
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(log_path.read_text(encoding="utf-8")))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["ld-gc-sections-to-funcs", "-o", str(output_path)],
+    )
+
+    assert module.main() == 0
+    assert output_path.read_text(encoding="utf-8").lstrip("\n") == expected_path.read_text(
+        encoding="utf-8"
+    )

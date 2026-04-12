@@ -1,0 +1,5 @@
+ld: removing unused section '.text.helper.constprop.0' in file 'lib.o'
+ld: removing unused section '.text.helper.constprop.0' in file 'lib.o'
+ld: removing unused section '.text.helper' in file 'lib.o'
+ld: removing unused section '.text.unlikely.foo.constprop.0' in file 'lib.o'
+ld: removing unused section '.rodata.helper.str1.8' in file 'lib.o'

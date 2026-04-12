@@ -1,0 +1,1 @@
+ld: removing unused section '.text.helper.constprop.0' in file 'lib.o'

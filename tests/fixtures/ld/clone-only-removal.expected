@@ -1,0 +1,6 @@
+# INFO skipped clone-only removal for helper from lib.o
+# reason: live out-of-line body still present
+# removed bodies: helper.constprop.0
+# remaining bodies: helper
+# helper
+
