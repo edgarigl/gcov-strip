@@ -1,7 +1,10 @@
 """Regression tests for gcov-strip."""
 
 import argparse
+import os
 import struct
+import subprocess
+import sys
 from collections import defaultdict
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
@@ -18,6 +21,11 @@ def load_script_module():
     module = module_from_spec(spec)
     loader.exec_module(module)
     return module
+
+
+def repo_root():
+    """Return the repository root that holds the standalone scripts."""
+    return Path(__file__).resolve().parents[1]
 
 
 def encode_gcov_string(value, use_word_counts):
@@ -320,3 +328,57 @@ def test_main_rewrites_matching_gcno_file(tmp_path, monkeypatch, capsys):
         if tag == module.GCOV_TAG_FUNCTION
     ] == ["foo"]
     assert "Processed 1 file(s); removed 1 function record(s)." in capsys.readouterr().out
+
+
+def test_local_pip_install_exposes_public_script_names(tmp_path):
+    """A local pip install should expose the standalone script entry points."""
+    venv_dir = tmp_path / "venv"
+    env = dict(os.environ)
+    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--system-site-packages", str(venv_dir)],
+        check=True,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    venv_python = venv_dir / "bin" / "python"
+    venv_pip = venv_dir / "bin" / "pip"
+    gcov_strip = venv_dir / "bin" / "gcov-strip"
+    ld_tool = venv_dir / "bin" / "ld-gc-sections-to-funcs"
+
+    subprocess.run(
+        [str(venv_pip), "install", "--no-build-isolation", str(repo_root())],
+        check=True,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    assert gcov_strip.exists()
+    assert ld_tool.exists()
+
+    gcov_help = subprocess.run(
+        [str(gcov_strip), "--help"],
+        check=True,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    ld_help = subprocess.run(
+        [str(ld_tool), "--help"],
+        check=True,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    assert "Remove selected function records" in gcov_help.stdout
+    assert "Extract removed function names" in ld_help.stdout
+    assert venv_python.exists()

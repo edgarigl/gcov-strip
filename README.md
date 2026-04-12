@@ -129,14 +129,14 @@ The tools can be installed directly from a git URL while keeping the current
 command names:
 
 ```bash
-pip install git+ssh://git@github.com/<owner>/<repo>.git
+pip install git+https://github.com/edgarigl/gcov-strip
 ```
 
 Developer mode:
 
 ```bash
-git clone <repo-url>
-cd ctest
+git clone https://github.com/edgarigl/gcov-strip
+cd gcov-strip
 pip install -e .
 ```
 
