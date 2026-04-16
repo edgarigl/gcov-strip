@@ -438,7 +438,7 @@ class RemovalResolver:
         name = entry.name
         obj_path = entry.obj_path
         if obj_path and matching_gcno_path(obj_path):
-            return self.resolve_gcno_entry(name, obj_path)
+            return self.resolve_gcno_entry(entry, obj_path)
 
         leaf_objects = sorted(self.gcno_symbol_index.get(name, set()))
         chosen_object, candidate_objects = pick_leaf_object(
@@ -449,7 +449,7 @@ class RemovalResolver:
         )
 
         if chosen_object is not None:
-            return self.resolve_gcno_entry(name, chosen_object)
+            return self.resolve_gcno_entry(entry, chosen_object)
 
         if candidate_objects:
             return self.ambiguous_result(name, obj_path, candidate_objects)
@@ -535,15 +535,18 @@ class RemovalResolver:
 
     def resolve_gcno_entry(
         self,
-        name: str,
+        entry: RemovalEntry,
         obj_path: str,
     ) -> Tuple[List[str], List[str], List[str]]:
         """Resolve one removal for an object that already has a matching gcno."""
+        name = entry.name
         defined_bodies = self.object_bodies.get(obj_path, {}).get(name, set())
         if not defined_bodies:
             return [f"{obj_path}:{name}"], [], []
 
-        removed_bodies = self.removed_bodies.get(obj_path, {}).get(name, set())
+        removed_bodies = set(self.removed_bodies.get(obj_path, {}).get(name, set()))
+        if entry.symbol_name in defined_bodies:
+            removed_bodies.add(entry.symbol_name)
         if len(defined_bodies) == 1:
             return [f"{obj_path}:{name}"], [], []
 

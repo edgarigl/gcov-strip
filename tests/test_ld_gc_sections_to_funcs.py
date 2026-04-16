@@ -172,6 +172,55 @@ def test_resolve_removed_entries_skips_partial_clone_removals(monkeypatch):
     ]
 
 
+def test_resolve_removed_entries_preserves_removed_body_after_leaf_resolution(monkeypatch):
+    """Warnings should keep the raw body name after prelink-to-leaf resolution."""
+    module = load_script_module()
+
+    monkeypatch.setattr(
+        module,
+        "matching_gcno_path",
+        lambda path: "lib.gcno" if path == "lib.o" else None,
+    )
+    monkeypatch.setattr(
+        module,
+        "build_symbol_indexes",
+        lambda _root, _names: (
+            defaultdict(set, {"helper": {"lib.o"}}),
+            defaultdict(set, {"helper": {"lib.o"}}),
+            defaultdict(
+                lambda: defaultdict(set),
+                {
+                    "lib.o": defaultdict(
+                        set,
+                        {
+                            "helper": {"helper", "helper.constprop.0"},
+                        },
+                    ),
+                },
+            ),
+        ),
+    )
+
+    lines, warnings, review_lines = module.resolve_removed_entries(
+        [module.RemovalEntry("helper", "prelink.o", "helper.constprop.0")],
+        False,
+    )
+
+    assert lines == []
+    assert warnings == [
+        "Skipping gcno removal for helper from lib.o: removed bodies "
+        "(helper.constprop.0) still share coverage with live bodies (helper)"
+    ]
+    assert review_lines == [
+        "# INFO skipped clone-only removal for helper from lib.o",
+        "# reason: live out-of-line body still present",
+        "# removed bodies: helper.constprop.0",
+        "# remaining bodies: helper",
+        "# helper",
+        "",
+    ]
+
+
 def test_resolve_removed_entries_keeps_clone_only_body_when_it_is_unique(monkeypatch):
     """A cloned body can still own the only gcov-covered implementation."""
     module = load_script_module()
