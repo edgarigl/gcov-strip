@@ -75,6 +75,30 @@ def test_extract_functions_from_fixture_log():
     ]
 
 
+def test_extract_functions_ignores_generated_gcov_wrappers():
+    """GCC-generated gcov wrappers should not become gcov removals."""
+    module = load_script_module()
+
+    entries = module.extract_functions(
+        [
+            "ld: removing unused section '.text.startup._sub_I_00100_0' in file "
+            "'prelink.o'\n",
+            "ld: removing unused section '.text.exit._sub_D_00100_1' in file "
+            "'prelink.o'\n",
+            "ld: removing unused section '.text.__gcov_init' in file "
+            "'prelink.o'\n",
+            "ld: removing unused section '.text.__gcov_exit' in file "
+            "'prelink.o'\n",
+        ],
+        False,
+    )
+
+    assert entries == [
+        module.RemovalEntry("__gcov_init", "prelink.o", "__gcov_init"),
+        module.RemovalEntry("__gcov_exit", "prelink.o", "__gcov_exit"),
+    ]
+
+
 def test_pick_leaf_object_prefers_remaining_non_survivor():
     """A final-ELF survivor should let us pick the one removed candidate."""
     module = load_script_module()

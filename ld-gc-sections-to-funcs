@@ -153,6 +153,11 @@ NM_LINE_RE = re.compile(
 )
 NM_BATCH_SIZE = 64
 TEXT_SECTION_PREFIXES = ("unlikely", "startup", "hot", "exit")
+# GCC-generated gcov constructor/destructor wrappers. These do not have
+# their own gcno function records, so ignore them when translating linker
+# removals into gcno stripping candidates.
+# https://gcc.gnu.org/onlinedocs/gcc/Freestanding-Environments.html
+GENERATED_GCOV_WRAPPER_RE = re.compile(r"^_sub_[ID]_\d+_\d+$")
 
 
 def extract_functions(
@@ -173,6 +178,8 @@ def extract_functions(
         section, obj_path = match.groups()
         symbol_name = parse_text_section_name(section)
         if symbol_name is None:
+            continue
+        if GENERATED_GCOV_WRAPPER_RE.match(symbol_name):
             continue
         entry = RemovalEntry(
             normalize_name(symbol_name),
