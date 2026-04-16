@@ -71,7 +71,7 @@ def test_extract_functions_from_fixture_log():
     assert entries == [
         module.RemovalEntry("helper", "lib.o", "helper.constprop.0"),
         module.RemovalEntry("helper", "lib.o", "helper"),
-        module.RemovalEntry("foo", "lib.o", "foo.constprop.0"),
+        module.RemovalEntry("foo", "lib.o", "foo.constprop.0", is_unlikely=True),
     ]
 
 
@@ -243,6 +243,48 @@ def test_resolve_removed_entries_preserves_removed_body_after_leaf_resolution(mo
         "# helper",
         "",
     ]
+
+
+def test_resolve_removed_entries_removes_hot_and_cold_bodies_together(monkeypatch):
+    """Hot and cold sibling removals should combine after leaf resolution."""
+    module = load_script_module()
+
+    monkeypatch.setattr(
+        module,
+        "matching_gcno_path",
+        lambda path: "lib.gcno" if path == "lib.o" else None,
+    )
+    monkeypatch.setattr(
+        module,
+        "build_symbol_indexes",
+        lambda _root, _names: (
+            defaultdict(set, {"foo": {"lib.o"}}),
+            defaultdict(set, {"foo": {"lib.o"}}),
+            defaultdict(
+                lambda: defaultdict(set),
+                {
+                    "lib.o": defaultdict(
+                        set,
+                        {
+                            "foo": {"foo", "foo.cold"},
+                        },
+                    ),
+                },
+            ),
+        ),
+    )
+
+    lines, warnings, review_lines = module.resolve_removed_entries(
+        [
+            module.RemovalEntry("foo", "prelink.o", "foo"),
+            module.RemovalEntry("foo", "prelink.o", "foo", is_unlikely=True),
+        ],
+        False,
+    )
+
+    assert lines == ["lib.o:foo"]
+    assert warnings == []
+    assert review_lines == []
 
 
 def test_resolve_removed_entries_keeps_clone_only_body_when_it_is_unique(monkeypatch):

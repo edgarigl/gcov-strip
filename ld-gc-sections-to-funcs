@@ -79,6 +79,9 @@ class RemovalEntry:
     name: str
     obj_path: Optional[str]
     symbol_name: str
+    # `.text.unlikely.foo` in linker GC output usually corresponds to the
+    # emitted cold split body `foo.cold` in the leaf object.
+    is_unlikely: bool = False
 
 
 DieMap = Dict[int, Die]
@@ -185,6 +188,7 @@ def extract_functions(
             normalize_name(symbol_name),
             normalize_object_path(obj_path),
             symbol_name,
+            section.startswith(".text.unlikely."),
         )
         if entry not in seen:
             seen.add(entry)
@@ -350,16 +354,6 @@ def build_removed_object_set(removed_entries: List[RemovalEntry]) -> Set[str]:
     return removed_objects
 
 
-def build_removed_body_index(removed_entries: List[RemovalEntry]) -> BodyIndex:
-    """Index removed raw bodies as `object -> normalized function -> raw bodies`."""
-    removed_bodies: BodyIndex = defaultdict(lambda: defaultdict(set))
-    for entry in removed_entries:
-        if entry.obj_path is None:
-            continue
-        removed_bodies[entry.obj_path][entry.name].add(entry.symbol_name)
-    return removed_bodies
-
-
 def build_surviving_symbol_index(defined_functions: Set[FuncKey]) -> SymbolIndex:
     """Index final-DWARF `function -> surviving objects` relationships."""
     surviving: SymbolIndex = defaultdict(set)
@@ -418,7 +412,7 @@ class RemovalResolver:
             os.getcwd(),
             {entry.name for entry in removed_entries},
         )
-        self.removed_bodies = build_removed_body_index(removed_entries)
+        self.removed_entries = removed_entries
         self.removed_objects = build_removed_object_set(removed_entries)
         self.surviving_symbols = build_surviving_symbol_index(
             dwarf_state.final_defined_functions
@@ -551,9 +545,25 @@ class RemovalResolver:
         if not defined_bodies:
             return [f"{obj_path}:{name}"], [], []
 
-        removed_bodies = set(self.removed_bodies.get(obj_path, {}).get(name, set()))
-        if entry.symbol_name in defined_bodies:
-            removed_bodies.add(entry.symbol_name)
+        removed_bodies: Set[str] = set()
+        origin_obj_path = entry.obj_path
+        for sibling in self.removed_entries:
+            if sibling.obj_path != origin_obj_path or sibling.name != name:
+                continue
+
+            body_name = sibling.symbol_name
+            # GCC can split one function into a hot body plus a cold body
+            # emitted as `foo.cold`, while the linker log reports the cold
+            # part as `.text.unlikely.foo`.
+            if sibling.is_unlikely:
+                cold_name = f"{body_name}.cold"
+                if cold_name in defined_bodies:
+                    removed_bodies.add(cold_name)
+                    continue
+
+            if body_name in defined_bodies:
+                removed_bodies.add(body_name)
+
         if len(defined_bodies) == 1:
             return [f"{obj_path}:{name}"], [], []
 
