@@ -148,13 +148,18 @@ directly.
 
 The repo has three main test entry points:
 
-- `make check` runs `pylint` plus the `pytest` regression tests.
+- `make check` runs `pylint` plus the `pytest` suite. The pytest suite covers
+  script regression tests, a local `pip` install smoke test, and a committed
+  golden-output check for `examples/minimal/funcs-removed.cfg`.
 - `make check-gcc-matrix` runs the example end-to-end with each installed
   `gcc-X` / `gcov-X` pair from `GCC_VERSIONS`.
 - `make check-readelf-matrix` runs the broader DWARF/readelf matrix. It tests
   each installed GCC across the configured DWARF flag variants and compares the
   generated `funcs-removed.cfg` across the selected binutils `readelf`
   versions.
+
+The pytest suite runs directly from the source tree; it does not require
+`pip install -e .`.
 
 The readelf matrix writes:
 
