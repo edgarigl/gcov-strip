@@ -32,6 +32,7 @@ SUPPORTED_GCNO_VERSIONS = {
     b"*59A",
     b"*50B",
     b"*51B",
+    b"*34B",
     b"*25B",
     b"*42B",
     b"*33B",
