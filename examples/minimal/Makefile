@@ -32,9 +32,13 @@ $(TARGET): $(OBJS)
 run: $(TARGET)
 	./$(TARGET)
 	$(GCOVR) --html-details coverage.html --html-self-contained --decisions
-	$(GCOVR)
+	$(GCOVR) > coverage.txt
+	grep -q 'ctest.c' coverage.txt
+	grep -q 'foo.c' coverage.txt
+	! grep -q 'bar.c' coverage.txt
+	cat coverage.txt
 
 clean:
 	$(RM) funcs-removed.cfg
 	$(RM) $(OBJS) $(TARGET)
-	$(RM) *.gcda *.gcno *.gcov coverage*.html
+	$(RM) *.gcda *.gcno *.gcov coverage*.html coverage.txt

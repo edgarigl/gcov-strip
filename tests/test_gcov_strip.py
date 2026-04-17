@@ -432,6 +432,34 @@ def test_example_minimal_funcs_removed_matches_golden():
     assert actual == expected
 
 
+def test_example_minimal_gcovr_report_hides_removed_source():
+    """Coverage reporting should no longer mention the stripped-out source file."""
+    root = repo_root()
+
+    subprocess.run(
+        ["make", "-C", "examples/minimal", "clean"],
+        check=True,
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    result = subprocess.run(
+        ["make", "-C", "examples/minimal", "run"],
+        check=True,
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    stdout = result.stdout
+    summary = stdout.rsplit("GCC Code Coverage Report", 1)[-1]
+    assert "ctest.c" in summary
+    assert "foo.c" in summary
+    assert "bar.c" not in summary
+
+
 def test_example_static_lib_funcs_removed_matches_golden():
     """The static-lib example should emit whole-object removals from the map."""
     root = repo_root()
