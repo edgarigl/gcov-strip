@@ -28,6 +28,11 @@ def repo_root():
     return Path(__file__).resolve().parents[1]
 
 
+def fixtures_dir():
+    """Return the committed test fixture directory."""
+    return repo_root() / "tests" / "fixtures"
+
+
 def encode_gcov_string(value, use_word_counts):
     """Encode one gcov string field for the selected layout."""
     raw = value.encode("utf-8") + b"\x00"
@@ -328,6 +333,39 @@ def test_main_rewrites_matching_gcno_file(tmp_path, monkeypatch, capsys):
         if tag == module.GCOV_TAG_FUNCTION
     ] == ["foo"]
     assert "Processed 1 file(s); removed 1 function record(s)." in capsys.readouterr().out
+
+
+def test_example_minimal_funcs_removed_matches_golden():
+    """The minimal example should keep producing the reviewed removal config."""
+    root = repo_root()
+    expected = (
+        fixtures_dir()
+        / "example-minimal"
+        / "funcs-removed.cfg.expected"
+    ).read_text(encoding="utf-8")
+
+    subprocess.run(
+        ["make", "clean"],
+        check=True,
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    subprocess.run(
+        ["make", "ctest"],
+        check=True,
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    actual = (root / "examples" / "minimal" / "funcs-removed.cfg").read_text(
+        encoding="utf-8"
+    )
+
+    assert actual == expected
 
 
 def test_local_pip_install_exposes_public_script_names(tmp_path):
