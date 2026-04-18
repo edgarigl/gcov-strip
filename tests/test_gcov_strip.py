@@ -491,6 +491,34 @@ def test_example_static_lib_funcs_removed_matches_golden():
     assert (root / "examples" / "static-lib" / "bar.gcno").exists() is False
 
 
+def test_example_static_lib_gcovr_report_hides_removed_source():
+    """Coverage reporting should omit the archive member removed wholesale."""
+    root = repo_root()
+
+    subprocess.run(
+        ["make", "-C", "examples/static-lib", "clean"],
+        check=True,
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    result = subprocess.run(
+        ["make", "-C", "examples/static-lib", "demo"],
+        check=True,
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    stdout = result.stdout
+    summary = stdout.rsplit("GCC Code Coverage Report", 1)[-1]
+    assert "foo.c" in summary
+    assert "main.c" in summary
+    assert "bar.c" not in summary
+
+
 def test_local_pip_install_exposes_public_script_names(tmp_path):
     """A local pip install should expose the standalone script entry points."""
     venv_dir = tmp_path / "venv"
