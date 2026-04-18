@@ -185,6 +185,15 @@ Strip functions listed in `funcs-removed.cfg` and print removed lines:
 Use multiple `-c` options to combine several config files, and `--dry-run`
 to report removals without modifying `*.gcno` files.
 
+Whole-object removals use the same config file format:
+
+```txt
+lib/bar.o:*
+```
+
+That removes the whole matching `lib/bar.gcno` file instead of stripping
+individual function records from it.
+
 ## Object-qualified config format
 
 Generated configs use object-qualified removals:
@@ -194,6 +203,10 @@ common/bar.o:foo
 ```
 
 - `common/bar.o:foo` removes `foo` only while rewriting `common/bar.gcno`.
+
+`ld-gc-sections-to-funcs --linker-map` can generate `object:*` entries for
+static-library members that have matching `*.gcno` files but were never
+linked into the final image.
 
 When object resolution is ambiguous or impossible, generated configs now
 contain commented review notes instead of an unsafe bare-name fallback:
