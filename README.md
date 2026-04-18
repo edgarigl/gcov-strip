@@ -153,6 +153,9 @@ The repo has three main test entry points:
   golden-output check for `examples/minimal/funcs-removed.cfg`.
 - `make check-gcc-matrix` runs the example end-to-end with each installed
   `gcc-X` / `gcov-X` pair from `GCC_VERSIONS`.
+- `make check-static-lib-gcc-matrix` runs the static-library example across
+  the installed `gcc-X` / `gcov-X` pairs and exercises the linker-map based
+  whole-object gcno pruning path.
 - `make check-readelf-matrix` runs the broader DWARF/readelf matrix. It tests
   each installed GCC across the configured DWARF flag variants and compares the
   generated `funcs-removed.cfg` across the selected binutils `readelf`
