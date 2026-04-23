@@ -103,6 +103,16 @@ class DwarfParseResult(NamedTuple):
     assembly_defined_names: Set[str]
 
 
+@dataclass
+class ResolutionOutput:
+    """Mutable output state while resolving linker removals."""
+
+    resolved_lines: List[str]
+    warnings: List[str]
+    review_lines: List[str]
+    seen_lines: Set[str]
+
+
 REMOVAL_RE = re.compile(
     r"removing unused section '([^']+)' in file '([^']+)'", re.IGNORECASE
 )
@@ -521,6 +531,7 @@ def pick_leaf_object(
     removed_candidates = [
         path for path in leaf_objects if path not in set(surviving_objects)
     ]
+
     if surviving_objects:
         if len(removed_candidates) == 1:
             return removed_candidates, removed_candidates
@@ -750,28 +761,28 @@ class RemovalResolver:
         return [], warnings, review_lines
 
 
-def resolve_removed_entries(
-    removed_entries: List[RemovalEntry],
-    strict: bool,
-    dwarf_state: Optional[DwarfResolutionState] = None,
-) -> Tuple[List[str], List[str], List[str]]:
-    """Turn removed entries into active config lines and review notes."""
-    # Resolution order:
-    # 1. If the linker-reported object has its own gcno, emit it directly as
-    #    `object:function`.
-    # 2. Otherwise find leaf objects that define the same function name.
-    # 3. If final-ELF DWARF identifies which same-name leaf object survived,
-    #    choose the remaining candidate object as the removed one.
-    # 4. If resolution is still not unique, emit a `# REVIEW ...` block or fail
-    #    in strict mode.
-    #
-    resolver = RemovalResolver(removed_entries, strict, dwarf_state)
-    resolved_lines: List[str] = []
-    warnings: List[str] = []
-    review_lines: List[str] = []
-    seen_lines: Set[str] = set()
+def append_resolution_results(
+    state: ResolutionOutput,
+    candidate_lines: List[str],
+    entry_warnings: List[str],
+    entry_review_lines: List[str],
+) -> None:
+    """Append one entry's resolution results to the final output lists."""
+    state.warnings.extend(entry_warnings)
+    state.review_lines.extend(entry_review_lines)
+    for line in candidate_lines:
+        if line not in state.seen_lines:
+            state.seen_lines.add(line)
+            state.resolved_lines.append(line)
 
-    for entry in removed_entries:
+
+def finish_pending_entries(
+    resolver: RemovalResolver,
+    pending_entries: List[RemovalEntry],
+    state: ResolutionOutput,
+) -> None:
+    """Finish unresolved entries once no more staged progress is possible."""
+    for entry in pending_entries:
         chosen_objects, candidate_objects = resolver.select_leaf_objects(entry)
         if chosen_objects is not None:
             candidate_lines, entry_warnings, entry_review_lines = (
@@ -793,18 +804,91 @@ def resolve_removed_entries(
                 )
             )
 
-        warnings.extend(entry_warnings)
-        review_lines.extend(entry_review_lines)
-        for line in candidate_lines:
-            if line not in seen_lines:
-                seen_lines.add(line)
-                resolved_lines.append(line)
-
-    if strict and warnings:
-        raise RuntimeError(
-            "strict object matching failed:\n" + "\n".join(warnings)
+        append_resolution_results(
+            state,
+            candidate_lines,
+            entry_warnings,
+            entry_review_lines,
         )
-    return resolved_lines, warnings, review_lines
+
+
+def advance_pending_entries(
+    resolver: RemovalResolver,
+    pending_entries: List[RemovalEntry],
+    state: ResolutionOutput,
+) -> Tuple[List[RemovalEntry], bool]:
+    """Resolve one staged pass and return `(next_pending, made_progress)`."""
+    next_pending: List[RemovalEntry] = []
+    made_progress = False
+
+    for entry in pending_entries:
+        chosen_objects, _candidate_objects = resolver.select_leaf_objects(entry)
+        if chosen_objects is None:
+            next_pending.append(entry)
+            continue
+
+        candidate_lines, entry_warnings, entry_review_lines = (
+            resolver.resolve_selected_objects(entry, chosen_objects)
+        )
+        append_resolution_results(
+            state,
+            candidate_lines,
+            entry_warnings,
+            entry_review_lines,
+        )
+        made_progress = True
+
+    return next_pending, made_progress
+
+
+def resolve_removed_entries(
+    removed_entries: List[RemovalEntry],
+    strict: bool,
+    dwarf_state: Optional[DwarfResolutionState] = None,
+) -> Tuple[List[str], List[str], List[str]]:
+    """Turn removed entries into active config lines and review notes."""
+    # Resolution order:
+    # 1. If the linker-reported object has its own gcno, emit it directly as
+    #    `object:function`.
+    # 2. Otherwise find leaf objects that define the same function name.
+    # 3. If final-ELF DWARF identifies which same-name leaf object survived,
+    #    choose the remaining candidate object as the removed one.
+    # 4. Stage resolution in helper passes so later fixes can add more context
+    #    without growing one large control-flow block.
+    # 5. If resolution is still not unique, emit a `# REVIEW ...` block or fail
+    #    in strict mode.
+    #
+    resolver = RemovalResolver(removed_entries, strict, dwarf_state)
+    state = ResolutionOutput(
+        [],
+        [],
+        [],
+        set(),
+    )
+    pending_entries = list(removed_entries)
+
+    while pending_entries:
+        next_pending, made_progress = advance_pending_entries(
+            resolver,
+            pending_entries,
+            state,
+        )
+
+        if not made_progress:
+            finish_pending_entries(
+                resolver,
+                next_pending,
+                state,
+            )
+            break
+
+        pending_entries = next_pending
+
+    if strict and state.warnings:
+        raise RuntimeError(
+            "strict object matching failed:\n" + "\n".join(state.warnings)
+        )
+    return state.resolved_lines, state.warnings, state.review_lines
 
 
 def merge_config_lines(
