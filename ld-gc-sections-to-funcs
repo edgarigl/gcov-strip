@@ -111,6 +111,7 @@ class ResolutionOutput:
     warnings: List[str]
     review_lines: List[str]
     seen_lines: Set[str]
+    origin_removed_objects: DefaultDict[str, Set[str]]
 
 
 REMOVAL_RE = re.compile(
@@ -517,8 +518,12 @@ def pick_leaf_object(
     leaf_objects: List[str],
     surviving_symbols: SymbolIndex,
     removed_objects: Set[str],
+    preferred_removed_objects: Optional[Set[str]] = None,
 ) -> Tuple[Optional[List[str]], List[str]]:
     """Choose removed leaf objects and report the candidates considered."""
+    if preferred_removed_objects is None:
+        preferred_removed_objects = set()
+
     if len(leaf_objects) == 1:
         return leaf_objects, leaf_objects
 
@@ -532,9 +537,23 @@ def pick_leaf_object(
         path for path in leaf_objects if path not in set(surviving_objects)
     ]
 
+    # When several same-name leaf objects live inside one prelink.o, first
+    # prefer the candidates that were already proven removed from that same
+    # linker-origin object in an earlier staged pass.
+    preferred_candidates = [
+        path for path in removed_candidates if path in preferred_removed_objects
+    ]
     if surviving_objects:
+        if preferred_candidates:
+            return preferred_candidates, preferred_candidates
         if len(removed_candidates) == 1:
             return removed_candidates, removed_candidates
+
+    touched_objects = [
+        path for path in leaf_objects if path in preferred_removed_objects
+    ]
+    if touched_objects:
+        return touched_objects, touched_objects
 
     touched_objects = [path for path in leaf_objects if path in removed_objects]
     if len(touched_objects) == 1:
@@ -585,6 +604,7 @@ class RemovalResolver:
     def select_leaf_objects(
         self,
         entry: RemovalEntry,
+        preferred_removed_objects: Optional[Set[str]] = None,
     ) -> Tuple[Optional[List[str]], List[str]]:
         """Choose leaf objects for one removal entry."""
         name = entry.name
@@ -593,11 +613,28 @@ class RemovalResolver:
             return [obj_path], [obj_path]
 
         leaf_objects = sorted(self.gcno_symbol_index.get(name, set()))
+        if preferred_removed_objects:
+            filtered_preferred: Set[str] = set()
+            for path in preferred_removed_objects:
+                defined = self.object_bodies.get(path, {}).get(name, set())
+                if not defined:
+                    filtered_preferred.add(path)
+                    continue
+                if entry.symbol_name in defined:
+                    filtered_preferred.add(path)
+                    continue
+                if entry.is_unlikely:
+                    cold_name = f"{entry.symbol_name}.cold"
+                    if cold_name in defined:
+                        filtered_preferred.add(path)
+            preferred_removed_objects = filtered_preferred
+
         chosen_objects, candidate_objects = pick_leaf_object(
             name,
             leaf_objects,
             self.surviving_symbols,
             self.direct_removed_objects,
+            preferred_removed_objects,
         )
         return chosen_objects, candidate_objects
 
@@ -714,16 +751,30 @@ class RemovalResolver:
         if not defined_bodies:
             return [f"{obj_path}:{name}"], [], []
 
+        removed_bodies = self._collect_removed_bodies(entry, defined_bodies)
+        matched_removed = defined_bodies & removed_bodies
+
+        if len(defined_bodies) == 1:
+            return self._resolve_single_body(entry, obj_path, defined_bodies, matched_removed)
+
+        if defined_bodies.issubset(removed_bodies):
+            return [f"{obj_path}:{name}"], [], []
+
+        return self._resolve_multi_body(entry, obj_path, defined_bodies, removed_bodies)
+
+    def _collect_removed_bodies(
+        self,
+        entry: RemovalEntry,
+        defined_bodies: Set[str],
+    ) -> Set[str]:
+        """Collect removed body names that match the defined bodies for a leaf object."""
         removed_bodies: Set[str] = set()
         origin_obj_path = entry.obj_path
         for sibling in self.removed_entries:
-            if sibling.obj_path != origin_obj_path or sibling.name != name:
+            if sibling.obj_path != origin_obj_path or sibling.name != entry.name:
                 continue
 
             body_name = sibling.symbol_name
-            # GCC can split one function into a hot body plus a cold body
-            # emitted as `foo.cold`, while the linker log reports the cold
-            # part as `.text.unlikely.foo`.
             if sibling.is_unlikely:
                 cold_name = f"{body_name}.cold"
                 if cold_name in defined_bodies:
@@ -732,17 +783,42 @@ class RemovalResolver:
 
             if body_name in defined_bodies:
                 removed_bodies.add(body_name)
+        return removed_bodies
 
-        if len(defined_bodies) == 1:
-            return [f"{obj_path}:{name}"], [], []
+    def _resolve_single_body(
+        self,
+        entry: RemovalEntry,
+        obj_path: str,
+        defined_bodies: Set[str],
+        matched_removed: Set[str],
+    ) -> Tuple[List[str], List[str], List[str]]:
+        """Resolve a single-body object removal, warning if raw names mismatch."""
+        if matched_removed:
+            return [f"{obj_path}:{entry.name}"], [], []
 
-        if defined_bodies.issubset(removed_bodies):
-            return [f"{obj_path}:{name}"], [], []
+        only_body = next(iter(defined_bodies))
+        warnings = [
+            f"Skipping gcno removal for {entry.name} from {obj_path}: "
+            f"removed raw body {entry.symbol_name} "
+            f"(origin {entry.obj_path or '<unknown object>'}) "
+            f"does not match emitted body {only_body}"
+        ]
+        if self.strict:
+            return [], warnings, []
+        return [], warnings, []
 
+    def _resolve_multi_body(
+        self,
+        entry: RemovalEntry,
+        obj_path: str,
+        defined_bodies: Set[str],
+        removed_bodies: Set[str],
+    ) -> Tuple[List[str], List[str], List[str]]:
+        """Handle removal resolution when multiple bodies exist in the leaf object."""
         remaining_bodies = sorted(defined_bodies - removed_bodies)
         removed_body_list = sorted(removed_bodies) or ["unknown"]
         warnings = [
-            f"Skipping gcno removal for {name} from {obj_path}: "
+            f"Skipping gcno removal for {entry.name} from {obj_path}: "
             f"removed bodies ({', '.join(removed_body_list)}) still share "
             f"coverage with live bodies ({', '.join(remaining_bodies)})"
         ]
@@ -750,15 +826,26 @@ class RemovalResolver:
             return [], warnings, []
         review_lines = self.format_review_block(
             "# INFO skipped clone-only removal for "
-            f"{name} from {obj_path}",
+            f"{entry.name} from {obj_path}",
             [
                 "# reason: live out-of-line body still present",
                 f"# removed bodies: {', '.join(removed_body_list)}",
                 f"# remaining bodies: {', '.join(remaining_bodies)}",
             ],
-            name,
+            entry.name,
         )
         return [], warnings, review_lines
+
+
+def preferred_removed_objects_for_entry(
+    origin_removed_objects: DefaultDict[str, Set[str]],
+    entry: RemovalEntry,
+) -> Set[str]:
+    """Return leaf objects already resolved from the same linker-origin object."""
+    obj_path = entry.obj_path
+    if obj_path is None:
+        return set()
+    return origin_removed_objects.get(obj_path, set())
 
 
 def append_resolution_results(
@@ -783,7 +870,14 @@ def finish_pending_entries(
 ) -> None:
     """Finish unresolved entries once no more staged progress is possible."""
     for entry in pending_entries:
-        chosen_objects, candidate_objects = resolver.select_leaf_objects(entry)
+        preferred_removed_objects = preferred_removed_objects_for_entry(
+            state.origin_removed_objects,
+            entry,
+        )
+        chosen_objects, candidate_objects = resolver.select_leaf_objects(
+            entry,
+            preferred_removed_objects,
+        )
         if chosen_objects is not None:
             candidate_lines, entry_warnings, entry_review_lines = (
                 resolver.resolve_selected_objects(entry, chosen_objects)
@@ -822,7 +916,14 @@ def advance_pending_entries(
     made_progress = False
 
     for entry in pending_entries:
-        chosen_objects, _candidate_objects = resolver.select_leaf_objects(entry)
+        preferred_removed_objects = preferred_removed_objects_for_entry(
+            state.origin_removed_objects,
+            entry,
+        )
+        chosen_objects, _candidate_objects = resolver.select_leaf_objects(
+            entry,
+            preferred_removed_objects,
+        )
         if chosen_objects is None:
             next_pending.append(entry)
             continue
@@ -830,6 +931,11 @@ def advance_pending_entries(
         candidate_lines, entry_warnings, entry_review_lines = (
             resolver.resolve_selected_objects(entry, chosen_objects)
         )
+        # Remember leaf objects resolved from this linker-origin object so later
+        # same-name removals from the same prelink.o can reuse that provenance.
+        for obj_path in chosen_objects:
+            if entry.obj_path:
+                state.origin_removed_objects[entry.obj_path].add(obj_path)
         append_resolution_results(
             state,
             candidate_lines,
@@ -853,8 +959,8 @@ def resolve_removed_entries(
     # 2. Otherwise find leaf objects that define the same function name.
     # 3. If final-ELF DWARF identifies which same-name leaf object survived,
     #    choose the remaining candidate object as the removed one.
-    # 4. Stage resolution in helper passes so later fixes can add more context
-    #    without growing one large control-flow block.
+    # 4. Stage unambiguous removals first, then use those resolved leaf objects
+    #    as same-origin hints for later prelink.o-style duplicate names.
     # 5. If resolution is still not unique, emit a `# REVIEW ...` block or fail
     #    in strict mode.
     #
@@ -864,6 +970,7 @@ def resolve_removed_entries(
         [],
         [],
         set(),
+        defaultdict(set),
     )
     pending_entries = list(removed_entries)
 

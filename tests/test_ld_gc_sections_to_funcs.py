@@ -185,36 +185,49 @@ def write_same_name_prelink_source(path, stem, keep_shared, bias):
     """Write one source file for a prelink.o same-name-static-local case."""
     if keep_shared:
         live_body = f"    return escape(shared({bias}));"
-        dead_body = "    return 0;"
+        # Keep the object alive through one exported function, but do not add a
+        # unique dead wrapper. That lets the test isolate the repeated
+        # `.text.shared` removals that must be resolved from prelink.o.
+        lines = [
+            "__attribute__((noinline)) int escape(int);",
+            f"static volatile int {stem}_bias = {bias};",
+            "",
+            "__attribute__((noinline)) static int shared(int value)",
+            "{",
+            f"    return value + {stem}_bias;",
+            "}",
+            "",
+            f"__attribute__((noinline)) int {stem}_live(void)",
+            "{",
+            live_body,
+            "}",
+            "",
+        ]
     else:
         live_body = f"    return {bias};"
         dead_body = f"    return escape(shared({bias + 10}));"
+        lines = [
+            "__attribute__((noinline)) int escape(int);",
+            f"static volatile int {stem}_bias = {bias};",
+            "",
+            "__attribute__((noinline)) static int shared(int value)",
+            "{",
+            f"    return value + {stem}_bias;",
+            "}",
+            "",
+            f"__attribute__((noinline)) int {stem}_live(void)",
+            "{",
+            live_body,
+            "}",
+            "",
+            f"__attribute__((noinline)) int {stem}_dead(void)",
+            "{",
+            dead_body,
+            "}",
+            "",
+        ]
 
-    path.write_text(
-        "\n".join(
-            [
-                "__attribute__((noinline)) int escape(int);",
-                f"static volatile int {stem}_bias = {bias};",
-                "",
-                "__attribute__((noinline)) static int shared(int value)",
-                "{",
-                f"    return value + {stem}_bias;",
-                "}",
-                "",
-                f"__attribute__((noinline)) int {stem}_live(void)",
-                "{",
-                live_body,
-                "}",
-                "",
-                f"__attribute__((noinline)) int {stem}_dead(void)",
-                "{",
-                dead_body,
-                "}",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def build_same_name_static_prelink_case(tmp_path, keep_shared_flags):
@@ -900,31 +913,9 @@ def test_same_name_static_locals_are_scoped_per_object(
 @pytest.mark.parametrize(
     ("keep_shared_flags", "expected_shared_lines", "expected_removed_count"),
     [
-        pytest.param(
-            (False, False, True),
-            ["one.o:shared", "two.o:shared"],
-            2,
-            marks=pytest.mark.xfail(
-                reason=(
-                    "prelink.o same-name removals collapse to one ambiguous "
-                    "candidate set"
-                ),
-                strict=True,
-            ),
-        ),
+        ((False, False, True), ["one.o:shared", "two.o:shared"], 2),
         ((True, True, True), [], 0),
-        pytest.param(
-            (True, False, True),
-            ["two.o:shared"],
-            1,
-            marks=pytest.mark.xfail(
-                reason=(
-                    "prelink.o same-name removals are not resolved back to "
-                    "the removed leaf object"
-                ),
-                strict=True,
-            ),
-        ),
+        ((True, False, True), ["two.o:shared"], 1),
     ],
     ids=[
         "only-one-shared-body-survives",
