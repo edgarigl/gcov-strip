@@ -346,11 +346,13 @@ def build_symbol_indexes(
 
 
 def build_removed_object_set(removed_entries: List[RemovalEntry]) -> Set[str]:
-    """Return leaf objects that already appear in linker removals."""
+    """Return leaf objects that already appear directly in linker removals."""
     removed_objects: Set[str] = set()
     for entry in removed_entries:
         obj_path = entry.obj_path
-        if obj_path and matching_gcno_path(obj_path):
+        if obj_path is None:
+            continue
+        if matching_gcno_path(obj_path):
             removed_objects.add(obj_path)
     return removed_objects
 
@@ -505,10 +507,10 @@ def pick_leaf_object(
     leaf_objects: List[str],
     surviving_symbols: SymbolIndex,
     removed_objects: Set[str],
-) -> Tuple[Optional[str], List[str]]:
-    """Choose one removed leaf object and report the candidates considered."""
+) -> Tuple[Optional[List[str]], List[str]]:
+    """Choose removed leaf objects and report the candidates considered."""
     if len(leaf_objects) == 1:
-        return leaf_objects[0], leaf_objects
+        return leaf_objects, leaf_objects
 
     # If final-ELF DWARF says which same-name leaf object survived, prefer the
     # remaining candidate. This is stronger than a name scan because it comes
@@ -519,12 +521,13 @@ def pick_leaf_object(
     removed_candidates = [
         path for path in leaf_objects if path not in set(surviving_objects)
     ]
-    if surviving_objects and len(removed_candidates) == 1:
-        return removed_candidates[0], removed_candidates
+    if surviving_objects:
+        if len(removed_candidates) == 1:
+            return removed_candidates, removed_candidates
 
     touched_objects = [path for path in leaf_objects if path in removed_objects]
     if len(touched_objects) == 1:
-        return touched_objects[0], touched_objects
+        return touched_objects, touched_objects
 
     return None, touched_objects or leaf_objects
 
@@ -550,7 +553,7 @@ class RemovalResolver:
             {entry.name for entry in removed_entries},
         )
         self.removed_entries = removed_entries
-        self.removed_objects = build_removed_object_set(removed_entries)
+        self.direct_removed_objects = build_removed_object_set(removed_entries)
         self.surviving_symbols = build_surviving_symbol_index(
             dwarf_state.final_defined_functions
         )
@@ -568,31 +571,49 @@ class RemovalResolver:
         """Build one commented review/info block with a trailing blank line."""
         return [heading, *detail_lines, f"# {name}", ""]
 
-    def resolve_one(
+    def select_leaf_objects(
         self,
         entry: RemovalEntry,
-    ) -> Tuple[List[str], List[str], List[str]]:
-        """Turn one removed function into config lines, warnings, and reviews."""
+    ) -> Tuple[Optional[List[str]], List[str]]:
+        """Choose leaf objects for one removal entry."""
         name = entry.name
         obj_path = entry.obj_path
         if obj_path and matching_gcno_path(obj_path):
-            return self.resolve_gcno_entry(entry, obj_path)
+            return [obj_path], [obj_path]
 
         leaf_objects = sorted(self.gcno_symbol_index.get(name, set()))
-        chosen_object, candidate_objects = pick_leaf_object(
+        chosen_objects, candidate_objects = pick_leaf_object(
             name,
             leaf_objects,
             self.surviving_symbols,
-            self.removed_objects,
+            self.direct_removed_objects,
         )
+        return chosen_objects, candidate_objects
 
-        if chosen_object is not None:
-            return self.resolve_gcno_entry(entry, chosen_object)
+    def resolve_selected_objects(
+        self,
+        entry: RemovalEntry,
+        obj_paths: List[str],
+    ) -> Tuple[List[str], List[str], List[str]]:
+        """Resolve one removal entry for a selected set of leaf objects."""
+        lines: List[str] = []
+        warnings: List[str] = []
+        review_lines: List[str] = []
+        seen_lines: Set[str] = set()
 
-        if candidate_objects:
-            return self.ambiguous_result(name, obj_path, candidate_objects)
+        for obj_path in obj_paths:
+            obj_lines, obj_warnings, obj_review_lines = self.resolve_gcno_entry(
+                entry,
+                obj_path,
+            )
+            warnings.extend(obj_warnings)
+            review_lines.extend(obj_review_lines)
+            for line in obj_lines:
+                if line not in seen_lines:
+                    seen_lines.add(line)
+                    lines.append(line)
 
-        return self.unresolved_result(name, obj_path)
+        return lines, warnings, review_lines
 
     def ambiguous_result(
         self,
@@ -738,31 +759,42 @@ def resolve_removed_entries(
     # Resolution order:
     # 1. If the linker-reported object has its own gcno, emit it directly as
     #    `object:function`.
-    # 2. Otherwise, if final-ELF DWARF identifies which same-name leaf object
-    #    survived, choose the remaining candidate object as the removed one.
-    # 3. Otherwise find leaf objects that define the same function name.
-    # 4. If exactly one leaf object matches, use it.
-    # 5. If several leaf objects match, prefer the one leaf object that also
-    #    appears somewhere in the linker removal set.
-    # 6. If resolution is still not unique, emit a `# REVIEW ...` block or fail
+    # 2. Otherwise find leaf objects that define the same function name.
+    # 3. If final-ELF DWARF identifies which same-name leaf object survived,
+    #    choose the remaining candidate object as the removed one.
+    # 4. If resolution is still not unique, emit a `# REVIEW ...` block or fail
     #    in strict mode.
     #
-    resolver = RemovalResolver(
-        removed_entries,
-        strict,
-        dwarf_state,
-    )
-
+    resolver = RemovalResolver(removed_entries, strict, dwarf_state)
     resolved_lines: List[str] = []
     warnings: List[str] = []
     review_lines: List[str] = []
     seen_lines: Set[str] = set()
 
     for entry in removed_entries:
-        candidate_lines, entry_warnings, entry_review_lines = resolver.resolve_one(entry)
+        chosen_objects, candidate_objects = resolver.select_leaf_objects(entry)
+        if chosen_objects is not None:
+            candidate_lines, entry_warnings, entry_review_lines = (
+                resolver.resolve_selected_objects(entry, chosen_objects)
+            )
+        elif candidate_objects:
+            candidate_lines, entry_warnings, entry_review_lines = (
+                resolver.ambiguous_result(
+                    entry.name,
+                    entry.obj_path,
+                    candidate_objects,
+                )
+            )
+        else:
+            candidate_lines, entry_warnings, entry_review_lines = (
+                resolver.unresolved_result(
+                    entry.name,
+                    entry.obj_path,
+                )
+            )
+
         warnings.extend(entry_warnings)
         review_lines.extend(entry_review_lines)
-
         for line in candidate_lines:
             if line not in seen_lines:
                 seen_lines.add(line)

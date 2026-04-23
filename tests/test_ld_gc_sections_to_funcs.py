@@ -557,7 +557,7 @@ def test_pick_leaf_object_prefers_remaining_non_survivor():
         set(),
     )
 
-    assert chosen == "b.o"
+    assert chosen == ["b.o"]
     assert candidates == ["b.o"]
 
 
