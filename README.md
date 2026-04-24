@@ -18,18 +18,18 @@ An additional static-library example lives under `examples/static-lib/`.
 
 ## How it works
 
-- `ld-gc-sections-to-funcs` parses the linker output and writes
+- `gcov-find-removals` parses the linker output and writes
   `funcs-removed.cfg` with object-qualified removals from garbage collection.
   When possible it writes `object:function` entries so removals are scoped
   to the matching `*.gcno` file instead of applying globally by name.
-- With `--linker-map`, `ld-gc-sections-to-funcs` can also emit whole-object
+- With `--linker-map`, `gcov-find-removals` can also emit whole-object
   removals for archive members that were never linked into the final image.
 - `gcov-strip` reads that config and removes those function records from
   any `*.gcno` files under the build directory.
 - `gcovr` uses the updated `gcno` files to produce the coverage report.
 
 If the linker reports discarded code from an intermediate object that does
-not have a matching `*.gcno` file, `ld-gc-sections-to-funcs` scans leaf
+not have a matching `*.gcno` file, `gcov-find-removals` scans leaf
 `*.o` files under the build tree and tries to map each removed name back to
 a single object. If that mapping is ambiguous, it prints a warning and
 falls back to a commented `# REVIEW ...` entry for human review unless
@@ -50,11 +50,11 @@ The object resolution order is:
 6. If resolution is still not unique, emit a commented `# REVIEW ...` entry,
    or fail with `--strict-object-match`.
 
-If the linker drops inline-only functions, `ld-gc-sections-to-funcs` can
+If the linker drops inline-only functions, `gcov-find-removals` can
 scan DWARF info to detect them using `--dwarf`:
 
 ```bash
-./ld-gc-sections-to-funcs \
+./gcov-find-removals \
   -o examples/minimal/funcs-removed.cfg \
   --dwarf examples/minimal/ctest
 ```
@@ -144,7 +144,7 @@ cd gcov-strip
 pip install -e .
 ```
 
-This packaging keeps `gcov-strip` and `ld-gc-sections-to-funcs` as standalone
+This packaging keeps `gcov-strip` and `gcov-find-removals` as standalone
 single-file scripts in the repo, so they can still be copied out and run
 directly.
 
@@ -212,7 +212,7 @@ common/bar.o:foo
 - `common/bar.o:foo` removes `foo` only while rewriting `common/bar.gcno`.
 - `common/bar.o:*` removes the whole `common/bar.gcno` file.
 
-`ld-gc-sections-to-funcs --linker-map` can generate `object:*` entries for
+`gcov-find-removals --linker-map` can generate `object:*` entries for
 static-library members that have matching `*.gcno` files but were never
 linked into the final image.
 
@@ -240,7 +240,7 @@ Assembler DWARF does not block this classification:
 
 ## Strict mode
 
-- `ld-gc-sections-to-funcs --strict-object-match` fails instead of falling
+- `gcov-find-removals --strict-object-match` fails instead of falling
   back to a commented review entry when a removed symbol cannot be mapped to a
   single leaf object.
 

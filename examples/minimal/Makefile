@@ -26,7 +26,7 @@ $(OBJS): Makefile
 
 $(TARGET): $(OBJS)
 	$(LINK.o) $^ $(LOADLIBES) $(LDLIBS) -o $@ 2>&1 | \
-		$(ROOT)/ld-gc-sections-to-funcs --readelf "$(READELF)" -o funcs-removed.cfg
+		$(ROOT)/gcov-find-removals --readelf "$(READELF)" -o funcs-removed.cfg
 	$(ROOT)/gcov-strip -c funcs-removed.cfg --verbose --list-lines
 
 run: $(TARGET)

@@ -1,4 +1,4 @@
-"""Regression tests for ld-gc-sections-to-funcs."""
+"""Regression tests for gcov-find-removals."""
 
 import io
 import os
@@ -17,8 +17,8 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 def load_script_module():
     """Load the executable script as an importable module for testing."""
-    script_path = Path(__file__).resolve().parents[1] / "ld-gc-sections-to-funcs"
-    loader = SourceFileLoader("ld_gc_sections_to_funcs", str(script_path))
+    script_path = Path(__file__).resolve().parents[1] / "gcov-find-removals"
+    loader = SourceFileLoader("gcov_find_removals", str(script_path))
     spec = spec_from_loader(loader.name, loader)
     module = module_from_spec(spec)
     loader.exec_module(module)
@@ -26,8 +26,8 @@ def load_script_module():
 
 
 def script_path():
-    """Return the standalone ld-gc-sections-to-funcs script path."""
-    return Path(__file__).resolve().parents[1] / "ld-gc-sections-to-funcs"
+    """Return the standalone gcov-find-removals script path."""
+    return Path(__file__).resolve().parents[1] / "gcov-find-removals"
 
 
 def run_command(args, cwd):
@@ -1051,7 +1051,7 @@ def test_main_writes_clone_suppression_fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["ld-gc-sections-to-funcs", "-o", str(output_path)],
+        ["gcov-find-removals", "-o", str(output_path)],
     )
 
     assert module.main() == 0

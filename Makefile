@@ -26,7 +26,7 @@ test:
 	pytest -q
 
 check:
-	pylint gcov-strip ld-gc-sections-to-funcs
+	pylint gcov-strip gcov-find-removals
 	$(MAKE) test
 
 check-gcc-matrix:

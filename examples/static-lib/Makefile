@@ -28,7 +28,7 @@ $(LIB): $(LIBOBJS)
 
 $(TARGET): main.o $(LIB)
 	$(LINK.o) main.o $(LIB) -o $@ 2> link.log
-	$(ROOT)/ld-gc-sections-to-funcs \
+	$(ROOT)/gcov-find-removals \
 		--quiet \
 		--linker-map link.map \
 		-o funcs-removed.cfg < link.log

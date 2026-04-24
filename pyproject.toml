@@ -21,7 +21,7 @@ classifiers = [
 [tool.setuptools]
 script-files = [
   "gcov-strip",
-  "ld-gc-sections-to-funcs",
+  "gcov-find-removals",
 ]
 
 [tool.pytest.ini_options]

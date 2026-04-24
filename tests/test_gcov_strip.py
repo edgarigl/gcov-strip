@@ -537,7 +537,7 @@ def test_local_pip_install_exposes_public_script_names(tmp_path):
     venv_python = venv_dir / "bin" / "python"
     venv_pip = venv_dir / "bin" / "pip"
     gcov_strip = venv_dir / "bin" / "gcov-strip"
-    ld_tool = venv_dir / "bin" / "ld-gc-sections-to-funcs"
+    ld_tool = venv_dir / "bin" / "gcov-find-removals"
 
     subprocess.run(
         [str(venv_pip), "install", "--no-build-isolation", str(repo_root())],
