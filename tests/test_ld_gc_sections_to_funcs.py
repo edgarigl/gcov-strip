@@ -181,6 +181,182 @@ def build_same_name_static_case(tmp_path, keep_shared_flags):
     return lines, removed_shared_count, script_result.stderr
 
 
+def write_same_name_prelink_source(path, stem, keep_shared, bias):
+    """Write one source file for a prelink.o same-name-static-local case."""
+    if keep_shared:
+        live_body = f"    return escape(shared({bias}));"
+        dead_body = "    return 0;"
+    else:
+        live_body = f"    return {bias};"
+        dead_body = f"    return escape(shared({bias + 10}));"
+
+    path.write_text(
+        "\n".join(
+            [
+                "__attribute__((noinline)) int escape(int);",
+                f"static volatile int {stem}_bias = {bias};",
+                "",
+                "__attribute__((noinline)) static int shared(int value)",
+                "{",
+                f"    return value + {stem}_bias;",
+                "}",
+                "",
+                f"__attribute__((noinline)) int {stem}_live(void)",
+                "{",
+                live_body,
+                "}",
+                "",
+                f"__attribute__((noinline)) int {stem}_dead(void)",
+                "{",
+                dead_body,
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def build_same_name_static_prelink_case(tmp_path, keep_shared_flags):
+    """Build one prelink.o case and return removed `:shared` config lines."""
+    cc = os.environ.get("CC", "gcc")
+    if shutil.which(cc) is None:
+        pytest.skip(f"{cc} not found")
+
+    stems = ["one", "two", "three"]
+    cflags = [
+        "-Wall",
+        "-O2",
+        "-g",
+        "-fno-inline",
+        "-fno-ipa-cp",
+        "-fno-ipa-sra",
+        "-fno-tree-ccp",
+        "-ffunction-sections",
+        "-fprofile-arcs",
+        "-ftest-coverage",
+    ]
+    ldflags = [
+        "-coverage",
+        "-Wl,--gc-sections",
+        "-Wl,--print-gc-sections",
+    ]
+
+    for index, stem in enumerate(stems, start=1):
+        source_path = tmp_path / f"{stem}.c"
+        write_same_name_prelink_source(
+            source_path,
+            stem,
+            keep_shared_flags[index - 1],
+            index,
+        )
+        run_command(
+            [cc, *cflags, "-c", source_path.name, "-o", f"{stem}.o"],
+            tmp_path,
+        )
+
+    (tmp_path / "escape.c").write_text(
+        "\n".join(
+            [
+                "__attribute__((noinline)) int escape(int value)",
+                "{",
+                "    return value;",
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    run_command(
+        [cc, *cflags, "-c", "escape.c", "-o", "escape.o"],
+        tmp_path,
+    )
+
+    (tmp_path / "main.c").write_text(
+        "\n".join(
+            [
+                "int one_live(void);",
+                "int two_live(void);",
+                "int three_live(void);",
+                "",
+                "int main(void)",
+                "{",
+                "    return one_live() + two_live() + three_live();",
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    run_command(
+        [cc, *cflags, "-c", "main.c", "-o", "main.o"],
+        tmp_path,
+    )
+
+    # `--unique=.text.*` keeps same-name local text sections separate inside
+    # prelink.o so the final link can report repeated removals of `.text.shared`.
+    run_command(
+        [
+            cc,
+            "-r",
+            "-Wl,--unique=.text.*",
+            "-o",
+            "prelink.o",
+            "one.o",
+            "two.o",
+            "three.o",
+            "escape.o",
+        ],
+        tmp_path,
+    )
+
+    link_result = subprocess.run(
+        [
+            cc,
+            *ldflags,
+            "-o",
+            "app",
+            "main.o",
+            "prelink.o",
+        ],
+        cwd=tmp_path,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    removed_shared_count = 0
+    for line in link_result.stderr.splitlines():
+        if ".text.shared" in line:
+            removed_shared_count += 1
+
+    output_path = tmp_path / "funcs-removed.cfg"
+    script_result = subprocess.run(
+        [
+            sys.executable,
+            str(script_path()),
+            "--quiet",
+            "-o",
+            output_path.name,
+        ],
+        cwd=tmp_path,
+        input=link_result.stderr,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    lines = []
+    for line in output_path.read_text(encoding="utf-8").splitlines():
+        if not line or line.startswith("#"):
+            continue
+        if line.endswith(":shared"):
+            lines.append(line)
+
+    return lines, removed_shared_count, script_result.stderr
+
 
 def test_parse_text_section_name_keeps_clone_removals():
     """Clone-suffixed discarded sections should keep their raw symbol spelling."""
@@ -719,6 +895,59 @@ def test_same_name_static_locals_are_scoped_per_object(
     assert removed_shared_count == expected_removed_count
     assert sorted(lines) == expected_shared_lines
     assert "warning:" not in stderr_text
+
+
+@pytest.mark.parametrize(
+    ("keep_shared_flags", "expected_shared_lines", "expected_removed_count"),
+    [
+        pytest.param(
+            (False, False, True),
+            ["one.o:shared", "two.o:shared"],
+            2,
+            marks=pytest.mark.xfail(
+                reason=(
+                    "prelink.o same-name removals collapse to one ambiguous "
+                    "candidate set"
+                ),
+                strict=True,
+            ),
+        ),
+        ((True, True, True), [], 0),
+        pytest.param(
+            (True, False, True),
+            ["two.o:shared"],
+            1,
+            marks=pytest.mark.xfail(
+                reason=(
+                    "prelink.o same-name removals are not resolved back to "
+                    "the removed leaf object"
+                ),
+                strict=True,
+            ),
+        ),
+    ],
+    ids=[
+        "only-one-shared-body-survives",
+        "all-shared-bodies-survive",
+        "subset-of-shared-bodies-survive",
+    ],
+)
+def test_same_name_static_locals_from_prelink(
+    tmp_path,
+    keep_shared_flags,
+    expected_shared_lines,
+    expected_removed_count,
+):
+    """Incremental links should still scope same-name static removals."""
+    lines, removed_shared_count, stderr_text = build_same_name_static_prelink_case(
+        tmp_path,
+        keep_shared_flags,
+    )
+
+    assert removed_shared_count == expected_removed_count
+    assert sorted(lines) == expected_shared_lines
+    assert "warning:" not in stderr_text
+
 
 def test_main_writes_clone_suppression_fixture(tmp_path, monkeypatch):
     """The script should emit an explanatory info block for skipped clone removals."""
