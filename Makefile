@@ -75,6 +75,7 @@ help:
 
 clean:
 	$(MAKE) -C $(EXAMPLE_DIR) ROOT=$(CURDIR) clean
+	$(MAKE) -C examples/static-lib ROOT=$(CURDIR) clean
 	$(RM) -r dumps
 	$(RM) -r tests/cache/build
 	$(RM) funcs-removed.cfg
