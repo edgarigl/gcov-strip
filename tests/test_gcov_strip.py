@@ -97,6 +97,7 @@ def test_parse_config_entry_requires_object_scoped_entries():
     module = load_script_module()
 
     assert module.parse_config_entry("dir/foo.o:bar") == ("dir/foo.o", "bar")
+    assert module.parse_config_entry("dir/foo.o:*") == ("dir/foo.o", "*")
     with pytest.raises(ValueError):
         module.parse_config_entry("bar")
     with pytest.raises(ValueError):
@@ -429,6 +430,37 @@ def test_example_minimal_funcs_removed_matches_golden():
     )
 
     assert actual == expected
+
+
+def test_example_static_lib_funcs_removed_matches_golden():
+    """The static-lib example should emit whole-object removals from the map."""
+    root = repo_root()
+    expected = (
+        fixtures_dir()
+        / "example-static-lib"
+        / "funcs-removed.cfg.expected"
+    ).read_text(encoding="utf-8")
+
+    subprocess.run(
+        ["make", "-C", "examples/static-lib", "clean"],
+        check=True,
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    subprocess.run(
+        ["make", "-C", "examples/static-lib", "demo"],
+        check=True,
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    config_path = root / "examples" / "static-lib" / "funcs-removed.cfg"
+    assert config_path.read_text(encoding="utf-8") == expected
+    assert (root / "examples" / "static-lib" / "bar.gcno").exists() is False
 
 
 def test_local_pip_install_exposes_public_script_names(tmp_path):

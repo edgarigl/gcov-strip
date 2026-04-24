@@ -1,6 +1,7 @@
 """Regression tests for ld-gc-sections-to-funcs."""
 
 import io
+import subprocess
 import sys
 from collections import defaultdict
 from importlib.machinery import SourceFileLoader
@@ -73,6 +74,117 @@ def test_extract_functions_from_fixture_log():
         module.RemovalEntry("helper", "lib.o", "helper"),
         module.RemovalEntry("foo", "lib.o", "foo.constprop.0", is_unlikely=True),
     ]
+
+
+def test_parse_linker_map_included_members(tmp_path):
+    """The linker map parser should extract included archive members."""
+    module = load_script_module()
+
+    map_path = tmp_path / "link.map"
+    map_path.write_text(
+        "\n".join(
+            [
+                "Archive member included to satisfy reference by file (symbol)",
+                "",
+                "lib/libfoo.a(foo.o) main.o (foo)",
+                "lib/libfoo.a(bar.o) helper.o (bar)",
+                "",
+                "Linker script and memory map",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    archive_key = module.normalize_object_path(str(tmp_path / "lib" / "libfoo.a"))
+    assert module.parse_linker_map_included_members(str(map_path)) == {
+        (archive_key, "foo.o"),
+        (archive_key, "bar.o"),
+    }
+
+
+def test_resolve_linker_map_gcno_removals(tmp_path, monkeypatch):
+    """Archive members missing from the linker map should become `object:*`."""
+    module = load_script_module()
+
+    lib_dir = tmp_path / "lib"
+    lib_dir.mkdir()
+    (lib_dir / "foo.o").write_bytes(b"foo")
+    (lib_dir / "foo.gcno").write_bytes(b"")
+    (lib_dir / "bar.o").write_bytes(b"bar")
+    (lib_dir / "bar.gcno").write_bytes(b"")
+
+    subprocess.run(
+        ["ar", "rcs", str(lib_dir / "libstuff.a"), "foo.o", "bar.o"],
+        check=True,
+        cwd=lib_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    map_path = tmp_path / "link.map"
+    map_path.write_text(
+        "\n".join(
+            [
+                "Archive member included to satisfy reference by file (symbol)",
+                "",
+                "lib/libstuff.a(foo.o) main.o (foo)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(tmp_path)
+
+    lines, warnings = module.resolve_linker_map_gcno_removals(
+        str(tmp_path),
+        str(map_path),
+    )
+
+    assert lines == ["lib/bar.o:*"]
+    assert warnings == []
+
+
+def test_resolve_linker_map_gcno_removals_warns_for_missing_archive(tmp_path, monkeypatch):
+    """Map archives that cannot be resolved on disk should raise warnings."""
+    module = load_script_module()
+
+    map_path = tmp_path / "link.map"
+    map_path.write_text(
+        "\n".join(
+            [
+                "Archive member included to satisfy reference by file (symbol)",
+                "",
+                "lib/libstuff.a(foo.o) main.o (foo)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(tmp_path)
+
+    lines, warnings = module.resolve_linker_map_gcno_removals(
+        str(tmp_path),
+        str(map_path),
+    )
+
+    assert lines == []
+    archive_key = module.normalize_object_path(str(tmp_path / "lib" / "libstuff.a"))
+    assert warnings == [
+        f"linker map archive {archive_key} could not be found on disk"
+    ]
+
+
+def test_merge_config_lines_prefers_whole_object_directives():
+    """A whole-object removal should override per-function removals."""
+    module = load_script_module()
+
+    assert module.merge_config_lines(
+        ["foo.o:bar", "bar.o:baz"],
+        ["foo.o:*"],
+    ) == ["bar.o:baz", "foo.o:*"]
 
 
 def test_extract_functions_ignores_generated_gcov_wrappers():
