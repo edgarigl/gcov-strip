@@ -1,6 +1,8 @@
 """Regression tests for ld-gc-sections-to-funcs."""
 
 import io
+import os
+import shutil
 import subprocess
 import sys
 from collections import defaultdict
@@ -21,6 +23,163 @@ def load_script_module():
     module = module_from_spec(spec)
     loader.exec_module(module)
     return module
+
+
+def script_path():
+    """Return the standalone ld-gc-sections-to-funcs script path."""
+    return Path(__file__).resolve().parents[1] / "ld-gc-sections-to-funcs"
+
+
+def run_command(args, cwd):
+    """Run one subprocess and return the completed result."""
+    return subprocess.run(
+        args,
+        cwd=cwd,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def write_same_name_static_source(path, stem, keep_shared, bias):
+    """Write one object source with a live and dead wrapper around `shared`."""
+    if keep_shared:
+        live_body = f"    return shared({bias});"
+        dead_body = "    return 0;"
+    else:
+        live_body = f"    return {bias};"
+        dead_body = f"    return shared({bias + 10});"
+
+    path.write_text(
+        "\n".join(
+            [
+                f"static volatile int {stem}_bias = {bias};",
+                "",
+                "__attribute__((noinline)) static int shared(int value)",
+                "{",
+                f"    return value + {stem}_bias;",
+                "}",
+                "",
+                f"__attribute__((noinline)) int {stem}_live(void)",
+                "{",
+                live_body,
+                "}",
+                "",
+                f"__attribute__((noinline)) int {stem}_dead(void)",
+                "{",
+                dead_body,
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def build_same_name_static_case(tmp_path, keep_shared_flags):
+    """Build one temporary project and return removed `:shared` config lines."""
+    cc = os.environ.get("CC", "gcc")
+    if shutil.which(cc) is None:
+        pytest.skip(f"{cc} not found")
+
+    stems = ["one", "two", "three"]
+    cflags = [
+        "-Wall",
+        "-O2",
+        "-g",
+        "-ffunction-sections",
+        "-fprofile-arcs",
+        "-ftest-coverage",
+    ]
+    ldflags = [
+        "-coverage",
+        "-Wl,--gc-sections",
+        "-Wl,--print-gc-sections",
+    ]
+
+    for index, stem in enumerate(stems, start=1):
+        source_path = tmp_path / f"{stem}.c"
+        write_same_name_static_source(
+            source_path,
+            stem,
+            keep_shared_flags[index - 1],
+            index,
+        )
+        run_command(
+            [cc, *cflags, "-c", source_path.name, "-o", f"{stem}.o"],
+            tmp_path,
+        )
+
+    main_lines = [
+        "int one_live(void);",
+        "int two_live(void);",
+        "int three_live(void);",
+        "",
+        "int main(void)",
+        "{",
+        "    return one_live() + two_live() + three_live();",
+        "}",
+        "",
+    ]
+    (tmp_path / "main.c").write_text(
+        "\n".join(main_lines),
+        encoding="utf-8",
+    )
+    run_command(
+        [cc, *cflags, "-c", "main.c", "-o", "main.o"],
+        tmp_path,
+    )
+
+    link_result = subprocess.run(
+        [
+            cc,
+            *ldflags,
+            "-o",
+            "app",
+            "main.o",
+            "one.o",
+            "two.o",
+            "three.o",
+        ],
+        cwd=tmp_path,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    removed_shared_count = 0
+    for line in link_result.stderr.splitlines():
+        if ".text.shared" in line:
+            removed_shared_count += 1
+
+    output_path = tmp_path / "funcs-removed.cfg"
+    script_result = subprocess.run(
+        [
+            sys.executable,
+            str(script_path()),
+            "--quiet",
+            "-o",
+            output_path.name,
+        ],
+        cwd=tmp_path,
+        input=link_result.stderr,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    lines = []
+    for line in output_path.read_text(encoding="utf-8").splitlines():
+        if not line or line.startswith("#"):
+            continue
+        if line.endswith(":shared"):
+            lines.append(line)
+
+    return lines, removed_shared_count, script_result.stderr
+
 
 
 def test_parse_text_section_name_keeps_clone_removals():
@@ -531,6 +690,35 @@ def test_resolve_removed_entries_reports_likely_no_coverage(monkeypatch):
         "",
     ]
 
+
+@pytest.mark.parametrize(
+    ("keep_shared_flags", "expected_shared_lines", "expected_removed_count"),
+    [
+        ((False, False, True), ["one.o:shared", "two.o:shared"], 2),
+        ((True, True, True), [], 0),
+        ((True, False, True), ["two.o:shared"], 1),
+    ],
+    ids=[
+        "only-one-shared-body-survives",
+        "all-shared-bodies-survive",
+        "subset-of-shared-bodies-survive",
+    ],
+)
+def test_same_name_static_locals_are_scoped_per_object(
+    tmp_path,
+    keep_shared_flags,
+    expected_shared_lines,
+    expected_removed_count,
+):
+    """Same-name static locals should resolve to each removed leaf object."""
+    lines, removed_shared_count, stderr_text = build_same_name_static_case(
+        tmp_path,
+        keep_shared_flags,
+    )
+
+    assert removed_shared_count == expected_removed_count
+    assert sorted(lines) == expected_shared_lines
+    assert "warning:" not in stderr_text
 
 def test_main_writes_clone_suppression_fixture(tmp_path, monkeypatch):
     """The script should emit an explanatory info block for skipped clone removals."""
