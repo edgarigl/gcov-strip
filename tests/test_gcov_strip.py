@@ -189,6 +189,22 @@ def test_rebuild_gcno_keeps_word_count_record_lengths():
     assert [module.parse_function_name(payload, True) for tag, payload in records if tag == module.GCOV_TAG_FUNCTION] == ["foo"]
 
 
+def test_count_gcno_functions_counts_function_records_in_both_layouts():
+    """Whole-file removal accounting should count gcno function records."""
+    module = load_script_module()
+
+    for use_word_counts in (True, False):
+        data = build_gcno(
+            [
+                (module.GCOV_TAG_FUNCTION, build_function_payload("foo", use_word_counts)),
+                (module.GCOV_TAG_LINES, build_line_payload("foo.c", [1], use_word_counts)),
+                (module.GCOV_TAG_FUNCTION, build_function_payload("bar", use_word_counts)),
+            ],
+            use_word_counts,
+        )
+        assert module.count_gcno_functions(data) == 2
+
+
 def test_load_config_ignores_comments_and_normalizes_paths(tmp_path):
     """Config loading should skip comments and fold equivalent object paths."""
     module = load_script_module()
@@ -300,7 +316,31 @@ def test_handle_gcno_file_reports_verbose_and_lines(monkeypatch, capsys):
     assert "removed bar from foo.gcno" in captured.out
     assert "lines foo.gcno [('bar', {'bar.c': {7}})]" in captured.out
 
+def test_handle_gcno_file_removes_whole_gcno(tmp_path, capsys):
+    """A config entry with `*` should remove the whole gcno file."""
+    module = load_script_module()
 
+    gcno_path = tmp_path / "foo.gcno"
+    gcno_path.write_bytes(
+        build_gcno(
+            [
+                (module.GCOV_TAG_FUNCTION, build_function_payload("foo", False)),
+                (module.GCOV_TAG_FUNCTION, build_function_payload("bar", False)),
+            ],
+            False,
+        )
+    )
+    args = argparse.Namespace(list_lines=False, dry_run=False, verbose=True)
+
+    changed, removed = module.handle_gcno_file(
+        str(gcno_path),
+        args,
+        defaultdict(set, {"foo.o": {"*"}}),
+    )
+
+    assert (changed, removed) == (1, 2)
+    assert gcno_path.exists() is False
+    assert "removed whole gcno" in capsys.readouterr().out
 def test_main_rewrites_matching_gcno_file(tmp_path, monkeypatch, capsys):
     """Main should rewrite one matching gcno file from an on-disk config."""
     module = load_script_module()
@@ -334,7 +374,30 @@ def test_main_rewrites_matching_gcno_file(tmp_path, monkeypatch, capsys):
     ] == ["foo"]
     assert "Processed 1 file(s); removed 1 function record(s)." in capsys.readouterr().out
 
+def test_main_removes_whole_gcno_file_from_object_wide_entry(tmp_path, monkeypatch, capsys):
+    """Main should honor `object:*` config entries by deleting whole gcno files."""
+    module = load_script_module()
 
+    gcno_path = tmp_path / "foo.gcno"
+    config_path = tmp_path / "funcs.cfg"
+    gcno_path.write_bytes(
+        build_gcno(
+            [
+                (module.GCOV_TAG_FUNCTION, build_function_payload("foo", False)),
+                (module.GCOV_TAG_FUNCTION, build_function_payload("bar", False)),
+            ],
+            False,
+        )
+    )
+    config_path.write_text("foo.o:*\n", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+
+    assert module.main(["-c", str(config_path), "-v"]) == 0
+    assert gcno_path.exists() is False
+    captured = capsys.readouterr()
+    assert "removed whole gcno" in captured.out
+    assert "Processed 1 file(s); removed 2 function record(s)." in captured.out
 def test_example_minimal_funcs_removed_matches_golden():
     """The minimal example should keep producing the reviewed removal config."""
     root = repo_root()

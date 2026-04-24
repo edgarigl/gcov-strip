@@ -330,6 +330,18 @@ def handle_function_record(
     return parse_function_name(payload, use_word_counts)
 
 
+def count_gcno_functions(data: bytes) -> int:
+    """Count function records in one gcno blob."""
+    use_word_counts = select_gcno_layout(data)
+    start_offset = record_start_offset(data, use_word_counts)
+    count = 0
+    for tag, payload in iter_gcno_records(data, start_offset, use_word_counts):
+        name = handle_function_record(tag, payload, use_word_counts)
+        if name is not None:
+            count += 1
+    return count
+
+
 def find_gcno_files(root: str) -> Iterable[str]:
     """Yield gcno files recursively under `root`."""
     for base, _, files in os.walk(root):
@@ -439,6 +451,17 @@ def handle_gcno_file(
     if not remove_for_file:
         # Skip unrelated gcno files entirely; removals are always object-scoped.
         return 0, 0
+
+    # object.o:* is syntax for whole file removal.
+    if "*" in remove_for_file:
+        with open(path, "rb") as handle:
+            data = handle.read()
+        removed = count_gcno_functions(data)
+        if not args.dry_run:
+            os.remove(path)
+        if args.verbose:
+            print(f"removed whole gcno {path}")
+        return 1, removed
 
     changed, removed, removed_names, removed_lines = process_file(
         path,
