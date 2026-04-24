@@ -611,10 +611,6 @@ def test_parse_dwarf_data_accepts_dw_at_language_name(monkeypatch):
     assert "asm_func" in dwarf_data.assembly_defined_names
 
 
-@pytest.mark.xfail(
-    reason="final DWARF low_pc zero still counts as live code",
-    strict=True,
-)
 def test_parse_dwarf_data_ignores_zero_low_pc_in_final_dwarf(monkeypatch):
     """A final linked DWARF low_pc of zero should not count as live code."""
     module = load_script_module()

@@ -159,9 +159,13 @@ DWARF_SPECIFICATION_RE = re.compile(
 )
 # `DW_AT_low_pc` and `DW_AT_ranges` are the simplest cross-toolchain signals
 # that a subprogram still has concrete machine code in the final DWARF view.
-# If either is present, we treat the function as still having an out-of-line
-# body and therefore not safe to auto-remove as "inline-only".
-DWARF_LOW_PC_RE = re.compile(r"DW_AT_low_pc\b")
+# If either is present, we usually treat the function as still having an
+# out-of-line body and therefore not safe to auto-remove as "inline-only".
+#
+# Binutils clears debug relocations that point into discarded sections during
+# final links. In practice that can leave a dead subprogram DIE behind with
+# `DW_AT_low_pc: 0`. We special-case that below for final non-`.o` inputs.
+DWARF_LOW_PC_RE = re.compile(r"DW_AT_low_pc\s*:\s*(?P<value>.+)")
 DWARF_RANGES_RE = re.compile(r"DW_AT_ranges\b")
 NM_LINE_RE = re.compile(
     r"^(?:[0-9A-Fa-f]+\s+)?(?P<type>[A-Za-z])\s+(?P<name>\S+)$"
@@ -1239,43 +1243,63 @@ class DwarfScanner:
         Update one DIE from one readelf attribute line.
         """
         die = self.die_by_offset[current_offset]
-        if DWARF_LOW_PC_RE.search(line) or DWARF_RANGES_RE.search(line):
-            die.has_code = True
-            return
-
-        match = DWARF_NAME_RE.search(line)
+        match = DWARF_LOW_PC_RE.search(line)
         if match:
             value = clean_dwarf_value(match.group("value"))
-            die.name = value
+            try:
+                low_pc = int(value, 0)
+            except ValueError:
+                low_pc = None
 
-            if die.tag == "DW_TAG_compile_unit":
-                die.cu_name = value
-                die.cu_offset = current_offset
-            return
+            # Final linked DWARF can keep dead functions with `DW_AT_low_pc: 0`.
+            # That should not count as a surviving out-of-line body.
+            if die.dwarf_object is None and low_pc == 0:
+                return
 
-        match = DWARF_COMP_DIR_RE.search(line)
-        if match:
-            die.cu_comp_dir = clean_dwarf_value(match.group("value"))
-            return
+            die.has_code = True
+        elif DWARF_RANGES_RE.search(line):
+            die.has_code = True
+        else:
+            match = DWARF_NAME_RE.search(line)
+            if match:
+                self.handle_attr_name(
+                    current_offset,
+                    clean_dwarf_value(match.group("value")),
+                )
+                return
 
-        match = DWARF_LANGUAGE_RE.search(line)
-        if match:
-            die.cu_language = clean_dwarf_value(match.group("value"))
-            return
+            match = DWARF_COMP_DIR_RE.search(line)
+            if match:
+                die.cu_comp_dir = clean_dwarf_value(match.group("value"))
+                return
 
-        match = DWARF_LINKAGE_RE.search(line)
-        if match:
-            die.linkage_name = clean_dwarf_value(match.group("value"))
-            return
+            match = DWARF_LANGUAGE_RE.search(line)
+            if match:
+                die.cu_language = clean_dwarf_value(match.group("value"))
+                return
 
-        match = DWARF_ABSTRACT_ORIGIN_RE.search(line)
-        if match:
-            die.origin = int(match.group("offset"), 16)
-            return
+            match = DWARF_LINKAGE_RE.search(line)
+            if match:
+                die.linkage_name = clean_dwarf_value(match.group("value"))
+                return
 
-        match = DWARF_SPECIFICATION_RE.search(line)
-        if match:
-            die.declaration = int(match.group("offset"), 16)
+            match = DWARF_ABSTRACT_ORIGIN_RE.search(line)
+            if match:
+                die.origin = int(match.group("offset"), 16)
+                return
+
+            match = DWARF_SPECIFICATION_RE.search(line)
+            if match:
+                die.declaration = int(match.group("offset"), 16)
+
+    def handle_attr_name(self, current_offset: int, value: str) -> None:
+        """Record one DW_AT_name value on the current DIE."""
+        die = self.die_by_offset[current_offset]
+        die.name = value
+
+        if die.tag == "DW_TAG_compile_unit":
+            die.cu_name = value
+            die.cu_offset = current_offset
 
     def resolve_inline_callee(self, die: Die) -> Optional[FuncKey]:
         """
