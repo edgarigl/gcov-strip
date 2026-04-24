@@ -14,12 +14,16 @@ This repo contains a minimal example project that:
 The example sources and generated build artifacts live under
 `examples/minimal/`.
 
+An additional static-library example lives under `examples/static-lib/`.
+
 ## How it works
 
 - `ld-gc-sections-to-funcs` parses the linker output and writes
   `funcs-removed.cfg` with object-qualified removals from garbage collection.
   When possible it writes `object:function` entries so removals are scoped
   to the matching `*.gcno` file instead of applying globally by name.
+- With `--linker-map`, `ld-gc-sections-to-funcs` can also emit whole-object
+  removals for archive members that were never linked into the final image.
 - `gcov-strip` reads that config and removes those function records from
   any `*.gcno` files under the build directory.
 - `gcovr` uses the updated `gcno` files to produce the coverage report.
@@ -206,6 +210,7 @@ common/bar.o:foo
 ```
 
 - `common/bar.o:foo` removes `foo` only while rewriting `common/bar.gcno`.
+- `common/bar.o:*` removes the whole `common/bar.gcno` file.
 
 `ld-gc-sections-to-funcs --linker-map` can generate `object:*` entries for
 static-library members that have matching `*.gcno` files but were never
