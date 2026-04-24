@@ -106,6 +106,7 @@ class DwarfParseResult(NamedTuple):
 REMOVAL_RE = re.compile(
     r"removing unused section '([^']+)' in file '([^']+)'", re.IGNORECASE
 )
+ARCHIVE_MEMBER_RE = re.compile(r"^(?P<archive>\S+\.a)\((?P<member>[^)]+)\)")
 CLONE_SUFFIXES = (
     "constprop",
     "isra",
@@ -352,6 +353,129 @@ def build_removed_object_set(removed_entries: List[RemovalEntry]) -> Set[str]:
         if obj_path and matching_gcno_path(obj_path):
             removed_objects.add(obj_path)
     return removed_objects
+
+
+def parse_linker_map_included_members(path: str) -> Set[Tuple[str, str]]:
+    """Return `(archive, member)` pairs included according to one linker map."""
+    included: Set[Tuple[str, str]] = set()
+    in_archive_block = False
+    saw_archive_entry = False
+    map_dir = os.path.dirname(os.path.abspath(path))
+
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            stripped = line.strip()
+
+            if not in_archive_block:
+                if stripped == "Archive member included to satisfy reference by file (symbol)":
+                    in_archive_block = True
+                continue
+
+            if not stripped:
+                if saw_archive_entry:
+                    break
+                continue
+
+            match = ARCHIVE_MEMBER_RE.match(stripped)
+            if not match:
+                continue
+
+            archive = normalize_object_path(
+                os.path.join(map_dir, match.group("archive"))
+            )
+            member = match.group("member")
+            included.add((archive, member))
+            saw_archive_entry = True
+
+    return included
+
+
+def iter_archive_members(archive_path: str) -> Iterable[str]:
+    """Yield member names listed by `ar t` for one archive."""
+    try:
+        output = subprocess.check_output(
+            ["ar", "t", archive_path],
+            text=True,
+            errors="replace",
+            stderr=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(f"ar failed for archive {archive_path}") from exc
+
+    for line in output.splitlines():
+        member = line.strip()
+        if member:
+            yield member
+
+
+def iter_archive_paths(root: str) -> Iterable[str]:
+    """Yield static archives found under `root`."""
+    for base, _, files in os.walk(root):
+        for filename in files:
+            if filename.endswith(".a"):
+                yield os.path.join(base, filename)
+
+
+def collect_archive_paths(root: str) -> Set[str]:
+    """Return normalized archive paths found under `root`."""
+    archive_paths = set()
+    for path in iter_archive_paths(root):
+        archive_paths.add(normalize_object_path(path))
+    return archive_paths
+
+
+def find_missing_archives(
+    included: Set[Tuple[str, str]],
+    archive_paths: Set[str],
+) -> List[str]:
+    """Return sorted archive paths mentioned by the map but missing on disk."""
+    missing_archives = []
+    for archive_path, _member in included:
+        if archive_path in archive_paths:
+            continue
+        missing_archives.append(archive_path)
+    missing_archives.sort()
+    return missing_archives
+
+
+def resolve_linker_map_gcno_removals(
+    root: str,
+    linker_map: str,
+) -> Tuple[List[str], List[str]]:
+    """Return `object:*` lines plus warnings for map archives not found on disk."""
+    included = parse_linker_map_included_members(linker_map)
+
+    lines: List[str] = []
+    seen: Set[str] = set()
+    warnings: List[str] = []
+
+    archive_paths = collect_archive_paths(root)
+    missing_archives = find_missing_archives(included, archive_paths)
+
+    for archive_path in missing_archives:
+        warnings.append(
+            f"linker map archive {archive_path} could not be found on disk"
+        )
+
+    for archive_path in iter_archive_paths(root):
+        archive_key = normalize_object_path(archive_path)
+        archive_dir = os.path.dirname(archive_key)
+        for member in iter_archive_members(archive_path):
+            if not member.endswith(".o"):
+                continue
+            if (archive_key, member) in included:
+                continue
+
+            obj_path = normalize_object_path(os.path.join(archive_dir, member))
+            if not matching_gcno_path(obj_path):
+                continue
+
+            line = f"{obj_path}:*"
+            if line not in seen:
+                seen.add(line)
+                lines.append(line)
+
+    return lines, warnings
 
 
 def build_surviving_symbol_index(defined_functions: Set[FuncKey]) -> SymbolIndex:
@@ -636,6 +760,30 @@ def resolve_removed_entries(
             "strict object matching failed:\n" + "\n".join(warnings)
         )
     return resolved_lines, warnings, review_lines
+
+
+def merge_config_lines(
+    function_lines: List[str],
+    whole_object_lines: List[str],
+) -> List[str]:
+    """Merge active config lines and let `object:*` override object:function."""
+    merged = function_lines + whole_object_lines
+    whole_objects = {
+        obj_path
+        for function, obj_path in (parse_object_scoped_entry(line) for line in merged)
+        if function == "*"
+    }
+
+    lines: List[str] = []
+    seen: Set[str] = set()
+    for line in merged:
+        function, obj_path = parse_object_scoped_entry(line)
+        if function != "*" and obj_path in whole_objects:
+            continue
+        if line not in seen:
+            seen.add(line)
+            lines.append(line)
+    return lines
 
 
 def clean_name(name: str) -> str:
@@ -1044,6 +1192,10 @@ def parse_args() -> argparse.Namespace:
         default="readelf",
         help="Readelf binary to use for DWARF parsing. Default: readelf",
     )
+    parser.add_argument(
+        "--linker-map",
+        help="Path to a linker map file used to find unlinked archive members.",
+    )
     return parser.parse_args()
 
 
@@ -1124,6 +1276,17 @@ def main() -> int:
                 dwarf_data.final_defined_functions,
                 dwarf_data.assembly_defined_names,
             ),
+        )
+        whole_object_lines: List[str] = []
+        if args.linker_map:
+            whole_object_lines, map_warnings = resolve_linker_map_gcno_removals(
+                os.getcwd(),
+                args.linker_map,
+            )
+            warnings.extend(map_warnings)
+        resolved_config_lines = merge_config_lines(
+            resolved_config_lines,
+            whole_object_lines,
         )
         for warning in warnings:
             print(f"warning: {warning}", file=sys.stderr)
