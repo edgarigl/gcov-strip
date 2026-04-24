@@ -566,8 +566,11 @@ def test_pick_leaf_object_prefers_remaining_non_survivor():
     chosen, candidates = module.pick_leaf_object(
         "merge",
         ["a.o", "b.o"],
-        defaultdict(set, {"merge": {"a.o"}}),
-        set(),
+        module.LeafSelectionPolicy(
+            defaultdict(set, {"merge": {"a.o"}}),
+            set(),
+            set(),
+        ),
     )
 
     assert chosen == ["b.o"]
@@ -905,10 +908,6 @@ def test_resolve_removed_entries_reports_likely_no_coverage(monkeypatch):
     ]
 
 
-@pytest.mark.xfail(
-    reason="same-name locals still resolve too early from survivor hints",
-    strict=True,
-)
 def test_resolve_removed_entries_retries_same_name_after_same_origin_hint(monkeypatch):
     """Retry same-name locals after later same-origin removals resolve cleanly."""
     module = load_script_module()

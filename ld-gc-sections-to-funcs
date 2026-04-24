@@ -121,6 +121,7 @@ class LeafSelectionPolicy:
     surviving_symbols: SymbolIndex
     removed_objects: Set[str]
     preferred_removed_objects: Set[str]
+    allow_surviving_symbols: bool = True
 
 
 REMOVAL_RE = re.compile(
@@ -529,48 +530,40 @@ def build_surviving_symbol_index(defined_functions: Set[FuncKey]) -> SymbolIndex
 def pick_leaf_object(
     name: str,
     leaf_objects: List[str],
-    surviving_symbols: SymbolIndex,
-    removed_objects: Set[str],
-    preferred_removed_objects: Optional[Set[str]] = None,
+    policy: LeafSelectionPolicy,
 ) -> Tuple[Optional[List[str]], List[str]]:
     """Choose removed leaf objects and report the candidates considered."""
-    if preferred_removed_objects is None:
-        preferred_removed_objects = set()
-
     if len(leaf_objects) == 1:
         return leaf_objects, leaf_objects
+
+    touched_objects = [
+        path for path in leaf_objects
+        if path in policy.preferred_removed_objects
+    ]
+    if touched_objects:
+        return touched_objects, touched_objects
+
+    touched_objects = [
+        path for path in leaf_objects if path in policy.removed_objects
+    ]
+    if len(touched_objects) == 1:
+        return touched_objects, touched_objects
+
+    if not policy.allow_surviving_symbols:
+        return None, touched_objects or leaf_objects
 
     # If final-ELF DWARF says which same-name leaf object survived, prefer the
     # remaining candidate. This is stronger than a name scan because it comes
     # from the actual linked image instead of just "who defines this name".
     surviving_objects = sorted(
-        path for path in leaf_objects if path in surviving_symbols.get(name, set())
+        path for path in leaf_objects
+        if path in policy.surviving_symbols.get(name, set())
     )
     removed_candidates = [
         path for path in leaf_objects if path not in set(surviving_objects)
     ]
-
-    # When several same-name leaf objects live inside one prelink.o, first
-    # prefer the candidates that were already proven removed from that same
-    # linker-origin object in an earlier staged pass.
-    preferred_candidates = [
-        path for path in removed_candidates if path in preferred_removed_objects
-    ]
-    if surviving_objects:
-        if preferred_candidates:
-            return preferred_candidates, preferred_candidates
-        if len(removed_candidates) == 1:
-            return removed_candidates, removed_candidates
-
-    touched_objects = [
-        path for path in leaf_objects if path in preferred_removed_objects
-    ]
-    if touched_objects:
-        return touched_objects, touched_objects
-
-    touched_objects = [path for path in leaf_objects if path in removed_objects]
-    if len(touched_objects) == 1:
-        return touched_objects, touched_objects
+    if surviving_objects and len(removed_candidates) == 1:
+        return removed_candidates, removed_candidates
 
     return None, touched_objects or leaf_objects
 
@@ -618,6 +611,7 @@ class RemovalResolver:
         self,
         entry: RemovalEntry,
         preferred_removed_objects: Optional[Set[str]] = None,
+        allow_surviving_symbols: bool = True,
     ) -> Tuple[Optional[List[str]], List[str]]:
         """Choose leaf objects for one removal entry."""
         name = entry.name
@@ -626,6 +620,7 @@ class RemovalResolver:
             return [obj_path], [obj_path]
 
         leaf_objects = sorted(self.gcno_symbol_index.get(name, set()))
+        preferred_removed_objects = preferred_removed_objects or set()
         if preferred_removed_objects:
             filtered_preferred: Set[str] = set()
             for path in preferred_removed_objects:
@@ -642,12 +637,16 @@ class RemovalResolver:
                         filtered_preferred.add(path)
             preferred_removed_objects = filtered_preferred
 
-        chosen_objects, candidate_objects = pick_leaf_object(
-            name,
-            leaf_objects,
+        policy = LeafSelectionPolicy(
             self.surviving_symbols,
             self.direct_removed_objects,
             preferred_removed_objects,
+            allow_surviving_symbols,
+        )
+        chosen_objects, candidate_objects = pick_leaf_object(
+            name,
+            leaf_objects,
+            policy,
         )
         return chosen_objects, candidate_objects
 
@@ -890,6 +889,7 @@ def finish_pending_entries(
         chosen_objects, candidate_objects = resolver.select_leaf_objects(
             entry,
             preferred_removed_objects,
+            True,
         )
         if chosen_objects is not None:
             candidate_lines, entry_warnings, entry_review_lines = (
@@ -936,6 +936,7 @@ def advance_pending_entries(
         chosen_objects, _candidate_objects = resolver.select_leaf_objects(
             entry,
             preferred_removed_objects,
+            False,
         )
         if chosen_objects is None:
             next_pending.append(entry)
