@@ -611,6 +611,35 @@ def test_parse_dwarf_data_accepts_dw_at_language_name(monkeypatch):
     assert "asm_func" in dwarf_data.assembly_defined_names
 
 
+@pytest.mark.xfail(
+    reason="final DWARF low_pc zero still counts as live code",
+    strict=True,
+)
+def test_parse_dwarf_data_ignores_zero_low_pc_in_final_dwarf(monkeypatch):
+    """A final linked DWARF low_pc of zero should not count as live code."""
+    module = load_script_module()
+
+    dwarf_lines = [
+        "<0><0>: Abbrev Number: 1 (DW_TAG_compile_unit)",
+        "    <1>   DW_AT_name        : final.elf",
+        "<1><10>: Abbrev Number: 2 (DW_TAG_subprogram)",
+        "    <11>   DW_AT_name        : dead_func",
+        "    <12>   DW_AT_low_pc      : 0",
+        "    <13>   DW_AT_high_pc     : 0x20",
+        "<1><20>: Abbrev Number: 2 (DW_TAG_subprogram)",
+        "    <21>   DW_AT_name        : live_func",
+        "    <22>   DW_AT_low_pc      : 0x1000",
+        "    <23>   DW_AT_high_pc     : 0x20",
+    ]
+
+    monkeypatch.setattr(module, "iter_readelf", lambda _readelf, _path: dwarf_lines)
+
+    dwarf_data = module.parse_dwarf_data(["final.elf"], "readelf")
+
+    assert ("dead_func", None) not in dwarf_data.final_defined_functions
+    assert ("live_func", None) in dwarf_data.final_defined_functions
+
+
 def test_resolve_removed_entries_skips_partial_clone_removals(monkeypatch):
     """Removing one clone must not strip coverage for a live sibling body."""
     module = load_script_module()
@@ -878,6 +907,61 @@ def test_resolve_removed_entries_reports_likely_no_coverage(monkeypatch):
         "# foo",
         "",
     ]
+
+
+@pytest.mark.xfail(
+    reason="same-name locals still resolve too early from survivor hints",
+    strict=True,
+)
+def test_resolve_removed_entries_retries_same_name_after_same_origin_hint(monkeypatch):
+    """Retry same-name locals after later same-origin removals resolve cleanly."""
+    module = load_script_module()
+
+    gcno_paths = {
+        "xen/common/rangeset.o": "xen/common/rangeset.gcno",
+        "xen/lib/list-sort.o": "xen/lib/list-sort.gcno",
+    }
+    monkeypatch.setattr(module, "matching_gcno_path", lambda path: gcno_paths.get(path))
+    monkeypatch.setattr(
+        module,
+        "build_symbol_indexes",
+        lambda _root, _names: (
+            defaultdict(
+                set,
+                {
+                    "merge": {"xen/common/rangeset.o", "xen/lib/list-sort.o"},
+                    "rangeset_merge": {"xen/common/rangeset.o"},
+                },
+            ),
+            defaultdict(
+                set,
+                {
+                    "merge": {"xen/common/rangeset.o", "xen/lib/list-sort.o"},
+                    "rangeset_merge": {"xen/common/rangeset.o"},
+                },
+            ),
+            defaultdict(lambda: defaultdict(set)),
+        ),
+    )
+
+    lines, warnings, review_lines = module.resolve_removed_entries(
+        [
+            module.RemovalEntry("merge", "prelink.o", "merge"),
+            module.RemovalEntry("rangeset_merge", "prelink.o", "rangeset_merge"),
+        ],
+        False,
+        module.DwarfResolutionState(
+            {("merge", "xen/common/rangeset.o")},
+            set(),
+        ),
+    )
+
+    assert lines == [
+        "xen/common/rangeset.o:rangeset_merge",
+        "xen/common/rangeset.o:merge",
+    ]
+    assert warnings == []
+    assert review_lines == []
 
 
 @pytest.mark.parametrize(
