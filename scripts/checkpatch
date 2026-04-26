@@ -1,0 +1,397 @@
+#!/usr/bin/env python3
+"""Check changed Python lines for local coding-style issues."""
+
+import argparse
+import ast
+import os
+import subprocess
+import sys
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional, Set
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One style issue found in a changed file."""
+
+    path: str
+    line: int
+    code: str
+    message: str
+
+
+@dataclass(frozen=True)
+class DiffInput:
+    """One diff plus optional commit label for reporting."""
+
+    label: Optional[str]
+    diff_text: str
+
+
+def parse_args(argv: List[str]) -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Check changed Python lines for local coding-style issues."
+    )
+    parser.add_argument(
+        "target",
+        nargs="?",
+        help=(
+            "One commit or revision range to analyze. A single commit is "
+            "treated as commit^..commit."
+        ),
+    )
+    parser.add_argument(
+        "--cached",
+        action="store_true",
+        help="Analyze the staged git diff.",
+    )
+    parser.add_argument(
+        "--rev",
+        help="Analyze one git revision range, for example origin/master..HEAD.",
+    )
+    parser.add_argument(
+        "--diff",
+        help="Read one unified diff file, or '-' for stdin.",
+    )
+    return parser.parse_args(argv)
+
+
+def diff_target_from_arg(target: str) -> str:
+    """Return the git diff target for one commit or revision range."""
+    if ".." in target:
+        return target
+    return f"{target}^..{target}"
+
+
+def load_diff_text_for_git_target(diff_target: str) -> str:
+    """Load one unified diff from git for the selected target."""
+    return subprocess.check_output(
+        ["git", "diff", "--unified=0", diff_target],
+        text=True,
+        errors="replace",
+    )
+
+
+def commit_label(commit: str) -> str:
+    """Return `<short> <subject>` for one commit."""
+    short_commit = subprocess.check_output(
+        ["git", "rev-parse", "--short", commit],
+        text=True,
+        errors="replace",
+    ).strip()
+    subject = subprocess.check_output(
+        ["git", "show", "-s", "--format=%s", commit],
+        text=True,
+        errors="replace",
+    ).strip()
+    return f"{short_commit} {subject}"
+
+
+def iter_commit_targets(target: str) -> List[DiffInput]:
+    """Return per-commit diff inputs for one commit or revision range."""
+    diff_target = diff_target_from_arg(target)
+    commit_list = subprocess.check_output(
+        ["git", "rev-list", "--reverse", diff_target],
+        text=True,
+        errors="replace",
+    ).splitlines()
+
+    diff_inputs: List[DiffInput] = []
+    for commit in commit_list:
+        parent = subprocess.check_output(
+            ["git", "rev-parse", f"{commit}^"],
+            text=True,
+            errors="replace",
+        ).strip()
+        diff_text = load_diff_text_for_git_target(f"{parent}..{commit}")
+        diff_inputs.append(DiffInput(commit_label(commit), diff_text))
+    return diff_inputs
+
+
+def load_diff_inputs(args: argparse.Namespace) -> List[DiffInput]:
+    """Load diff inputs according to the selected input mode."""
+    explicit_modes = sum(
+        int(bool(value))
+        for value in (
+            args.cached,
+            args.rev,
+            args.diff,
+        )
+    )
+    if args.target and explicit_modes:
+        raise SystemExit(
+            "checkpatch: do not combine a positional target with --cached, "
+            "--rev, or --diff"
+        )
+
+    if args.cached:
+        return [
+            DiffInput(
+                None,
+                subprocess.check_output(
+                    ["git", "diff", "--cached", "--unified=0"],
+                    text=True,
+                    errors="replace",
+                ),
+            )
+        ]
+
+    if args.target:
+        return iter_commit_targets(args.target)
+
+    if args.rev:
+        return iter_commit_targets(args.rev)
+
+    if args.diff:
+        if args.diff == "-":
+            return [DiffInput(None, sys.stdin.read())]
+        with open(args.diff, "r", encoding="utf-8", errors="replace") as handle:
+            return [DiffInput(None, handle.read())]
+
+    if sys.stdin.isatty():
+        raise SystemExit("checkpatch: choose one of --cached, --rev, or --diff")
+    return [DiffInput(None, sys.stdin.read())]
+
+
+def parse_diff_added_lines(diff_text: str) -> Dict[str, Set[int]]:
+    """Return `path -> added line numbers` from one unified diff."""
+    added_lines_by_path: Dict[str, Set[int]] = {}
+    current_path: Optional[str] = None
+    current_line = 0
+
+    for line in diff_text.splitlines():
+        if line.startswith("+++ "):
+            path = line[4:]
+            if path == "/dev/null":
+                current_path = None
+                continue
+            if path.startswith("b/"):
+                path = path[2:]
+            current_path = path
+            added_lines_by_path.setdefault(current_path, set())
+            continue
+
+        if not line.startswith("@@ "):
+            if current_path is None:
+                continue
+            if line.startswith("+") and not line.startswith("+++"):
+                added_lines_by_path[current_path].add(current_line)
+                current_line += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                continue
+            elif line.startswith(" "):
+                current_line += 1
+            continue
+
+        if current_path is None:
+            continue
+        plus_chunk = line.split("+", 1)[1]
+        start_text = plus_chunk.split(",", 1)[0]
+        start_text = start_text.split(" ", 1)[0]
+        current_line = int(start_text)
+
+    return added_lines_by_path
+
+
+def is_python_file(path: str) -> bool:
+    """Return true when one path should be checked as Python code."""
+    if path.endswith(".py"):
+        return True
+    if not os.path.exists(path):
+        return False
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            first_line = handle.readline()
+    except OSError:
+        return False
+
+    return "python" in first_line
+
+
+def node_touches_added_lines(node: ast.AST, added_lines: Set[int]) -> bool:
+    """Return true when one AST node spans any added line."""
+    lineno = getattr(node, "lineno", None)
+    end_lineno = getattr(node, "end_lineno", lineno)
+    if lineno is None or end_lineno is None:
+        return False
+
+    for line in range(lineno, end_lineno + 1):
+        if line in added_lines:
+            return True
+    return False
+
+
+def check_top_level_spacing(path: str, added_lines: Set[int]) -> List[Finding]:
+    """Return findings for missing blank lines before top-level definitions."""
+    findings: List[Finding] = []
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        lines = handle.read().splitlines()
+
+    for line_number in sorted(added_lines):
+        if line_number < 1 or line_number > len(lines):
+            continue
+        line = lines[line_number - 1]
+        stripped = line.lstrip()
+        if stripped.startswith("def ") is False and stripped.startswith("class ") is False:
+            continue
+        if len(line) != len(stripped):
+            continue
+        if line_number == 1:
+            continue
+        previous = lines[line_number - 2]
+        if previous.strip():
+            findings.append(
+                Finding(
+                    path,
+                    line_number,
+                    "CSTYLE001",
+                    "add a blank line before a top-level definition",
+                )
+            )
+    return findings
+
+
+def is_complex_comprehension(node: ast.AST) -> bool:
+    """Return true when one comprehension looks denser than preferred."""
+    if isinstance(node, ast.GeneratorExp):
+        return True
+    if not isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)):
+        return False
+    if len(node.generators) != 1:
+        return True
+
+    generator = node.generators[0]
+    if generator.ifs:
+        return True
+    if not isinstance(generator.target, ast.Name):
+        return True
+    return False
+
+
+def check_ast_style(path: str, added_lines: Set[int]) -> List[Finding]:
+    """Return findings for AST-based style rules on added lines."""
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        source = handle.read()
+
+    try:
+        tree = ast.parse(source, filename=path)
+    except SyntaxError as exc:
+        return [
+            Finding(
+                path,
+                exc.lineno or 1,
+                "CSTYLE999",
+                f"cannot parse Python file: {exc.msg}",
+            )
+        ]
+
+    findings: List[Finding] = []
+    for node in ast.walk(tree):
+        if not node_touches_added_lines(node, added_lines):
+            continue
+
+        if isinstance(node, ast.Lambda):
+            findings.append(
+                Finding(
+                    path,
+                    node.lineno,
+                    "CSTYLE002",
+                    "prefer a named helper or explicit control flow over lambda",
+                )
+            )
+            continue
+
+        if is_complex_comprehension(node):
+            findings.append(
+                Finding(
+                    path,
+                    node.lineno,
+                    "CSTYLE003",
+                    "prefer an explicit loop over this comprehension form",
+                )
+            )
+
+    return findings
+
+
+def check_path(path: str, added_lines: Set[int]) -> List[Finding]:
+    """Return findings for one changed path."""
+    if not is_python_file(path):
+        return []
+    if not os.path.exists(path):
+        return []
+
+    findings = []
+    findings.extend(check_top_level_spacing(path, added_lines))
+    findings.extend(check_ast_style(path, added_lines))
+    return findings
+
+
+def render_finding_context(path: str, line_number: int) -> List[str]:
+    """Return a small unified-diff-style hunk around one finding."""
+    if not os.path.exists(path):
+        return []
+
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        lines = handle.read().splitlines()
+
+    if line_number < 1 or line_number > len(lines):
+        return []
+
+    start = max(1, line_number - 2)
+    end = min(len(lines), line_number + 2)
+    context_lines: List[str] = []
+    context_lines.append(
+        f"  @@ -{start},{end - start + 1} +{start},{end - start + 1} @@"
+    )
+    for current_line in range(start, end + 1):
+        prefix = "+"
+        if current_line != line_number:
+            prefix = " "
+        context_lines.append(
+            f"  {prefix}{lines[current_line - 1]}"
+        )
+    return context_lines
+
+
+def print_findings(label: Optional[str], findings: Iterable[Finding]) -> None:
+    """Print findings in a simple grep-friendly format."""
+    findings = list(findings)
+    if not findings:
+        return
+
+    if label:
+        print(f"commit {label}", file=sys.stderr)
+
+    for finding in findings:
+        print(
+            f"{finding.path}:{finding.line}: {finding.code}: {finding.message}",
+            file=sys.stderr,
+        )
+        for line in render_finding_context(finding.path, finding.line):
+            print(line, file=sys.stderr)
+        print(file=sys.stderr)
+
+
+def main(argv: List[str]) -> int:
+    """Load one diff, check changed Python lines, and print any findings."""
+    args = parse_args(argv)
+    findings: List[Finding] = []
+    for diff_input in load_diff_inputs(args):
+        added_lines_by_path = parse_diff_added_lines(diff_input.diff_text)
+        diff_findings: List[Finding] = []
+        for path, added_lines in sorted(added_lines_by_path.items()):
+            diff_findings.extend(check_path(path, added_lines))
+        if diff_findings:
+            print_findings(diff_input.label, diff_findings)
+            findings.extend(diff_findings)
+
+    if findings:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
