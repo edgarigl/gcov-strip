@@ -23,3 +23,17 @@ script-files = [
   "gcov-strip",
   "ld-gc-sections-to-funcs",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = [
+  "tests/cache",
+  "build",
+  "artifacts-arm64",
+  "artifacts-x86",
+  "artifacts-x86-2",
+  "artifacts-x86-map",
+  ".codex",
+  "__pycache__",
+  "gcov_strip_tools.egg-info",
+]
