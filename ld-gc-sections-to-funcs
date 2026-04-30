@@ -114,6 +114,15 @@ class ResolutionOutput:
     origin_removed_objects: DefaultDict[str, Set[str]]
 
 
+@dataclass
+class LeafSelectionPolicy:
+    """Hints used while resolving one same-name leaf-object choice."""
+
+    surviving_symbols: SymbolIndex
+    removed_objects: Set[str]
+    preferred_removed_objects: Set[str]
+
+
 REMOVAL_RE = re.compile(
     r"removing unused section '([^']+)' in file '([^']+)'", re.IGNORECASE
 )
