@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 from collections import defaultdict
+from itertools import product
 from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
@@ -13,6 +14,15 @@ from pathlib import Path
 import pytest
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+SAME_NAME_STEMS = ("one", "two", "three")
+SAME_NAME_KEEP_PATTERNS = list(product([False, True], repeat=len(SAME_NAME_STEMS)))
+SAME_NAME_KEEP_IDS = [
+    "-".join(
+        f"{stem}={'keep' if keep else 'drop'}"
+        for stem, keep in zip(SAME_NAME_STEMS, pattern)
+    )
+    for pattern in SAME_NAME_KEEP_PATTERNS
+]
 
 
 def load_script_module():
@@ -83,7 +93,6 @@ def build_same_name_static_case(tmp_path, keep_shared_flags):
     if shutil.which(cc) is None:
         pytest.skip(f"{cc} not found")
 
-    stems = ["one", "two", "three"]
     cflags = [
         "-Wall",
         "-O2",
@@ -98,7 +107,7 @@ def build_same_name_static_case(tmp_path, keep_shared_flags):
         "-Wl,--print-gc-sections",
     ]
 
-    for index, stem in enumerate(stems, start=1):
+    for index, stem in enumerate(SAME_NAME_STEMS, start=1):
         source_path = tmp_path / f"{stem}.c"
         write_same_name_static_source(
             source_path,
@@ -236,7 +245,6 @@ def build_same_name_static_prelink_case(tmp_path, keep_shared_flags):
     if shutil.which(cc) is None:
         pytest.skip(f"{cc} not found")
 
-    stems = ["one", "two", "three"]
     cflags = [
         "-Wall",
         "-O2",
@@ -252,7 +260,7 @@ def build_same_name_static_prelink_case(tmp_path, keep_shared_flags):
         "-Wl,--print-gc-sections",
     ]
 
-    for index, stem in enumerate(stems, start=1):
+    for index, stem in enumerate(SAME_NAME_STEMS, start=1):
         source_path = tmp_path / f"{stem}.c"
         write_same_name_prelink_source(
             source_path,
@@ -852,6 +860,56 @@ def test_resolve_linker_map_gcno_removals_warns_for_missing_archive(tmp_path, mo
     ]
 
 
+@pytest.mark.xfail(
+    reason="Linker map parser still rebases entries onto the map directory (staging-only fix).",
+    strict=False,
+)
+def test_resolve_linker_map_gcno_removals_with_external_map(tmp_path, monkeypatch):
+    """A linker map stored outside the project root should not create whole-object removals."""
+    module = load_script_module()
+
+    project_root = tmp_path / "project"
+    (project_root / "xen" / "lib").mkdir(parents=True)
+    foo_obj = project_root / "xen" / "lib" / "foo.o"
+    bar_obj = project_root / "xen" / "lib" / "bar.o"
+    foo_obj.write_bytes(b"foo")
+    bar_obj.write_bytes(b"bar")
+    (project_root / "xen" / "lib" / "foo.gcno").write_bytes(b"")
+
+    subprocess.run(
+        ["ar", "rcs", "libstuff.a", "foo.o", "bar.o"],
+        cwd=project_root / "xen" / "lib",
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    map_dir = tmp_path / "maps"
+    map_dir.mkdir()
+    map_path = map_dir / "link.map"
+    map_path.write_text(
+        "\n".join(
+            [
+                "Archive member included to satisfy reference by file (symbol)",
+                "",
+                "xen/lib/libstuff.a(foo.o) main.o (foo)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(project_root)
+    lines, warnings = module.resolve_linker_map_gcno_removals(
+        str(project_root),
+        str(map_path),
+    )
+
+    assert warnings == []
+    assert lines == []
+
+
 def test_merge_config_lines_prefers_whole_object_directives():
     """A whole-object removal should override per-function removals."""
     module = load_script_module()
@@ -1287,61 +1345,48 @@ def test_resolve_removed_entries_retries_same_name_after_same_origin_hint(monkey
 
 
 @pytest.mark.parametrize(
-    ("keep_shared_flags", "expected_shared_lines", "expected_removed_count"),
-    [
-        ((False, False, True), ["one.o:shared", "two.o:shared"], 2),
-        ((True, True, True), [], 0),
-        ((True, False, True), ["two.o:shared"], 1),
-    ],
-    ids=[
-        "only-one-shared-body-survives",
-        "all-shared-bodies-survive",
-        "subset-of-shared-bodies-survive",
-    ],
+    "keep_shared_flags",
+    SAME_NAME_KEEP_PATTERNS,
+    ids=SAME_NAME_KEEP_IDS,
 )
-def test_same_name_static_locals_are_scoped_per_object(
-    tmp_path,
-    keep_shared_flags,
-    expected_shared_lines,
-    expected_removed_count,
-):
+def test_same_name_static_locals_are_scoped_per_object(tmp_path, keep_shared_flags):
     """Same-name static locals should resolve to each removed leaf object."""
+    expected_shared_lines = sorted(
+        f"{stem}.o:shared"
+        for stem, keep in zip(SAME_NAME_STEMS, keep_shared_flags)
+        if not keep
+    )
     lines, removed_shared_count, stderr_text = build_same_name_static_case(
         tmp_path,
         keep_shared_flags,
     )
 
-    assert removed_shared_count == expected_removed_count
+    assert removed_shared_count == len(expected_shared_lines)
     assert sorted(lines) == expected_shared_lines
     assert "warning:" not in stderr_text
 
 
 @pytest.mark.parametrize(
-    ("keep_shared_flags", "expected_shared_lines", "expected_removed_count"),
-    [
-        ((False, False, True), ["one.o:shared", "two.o:shared"], 2),
-        ((True, True, True), [], 0),
-        ((True, False, True), ["two.o:shared"], 1),
-    ],
-    ids=[
-        "only-one-shared-body-survives",
-        "all-shared-bodies-survive",
-        "subset-of-shared-bodies-survive",
-    ],
+    "keep_shared_flags",
+    SAME_NAME_KEEP_PATTERNS,
+    ids=SAME_NAME_KEEP_IDS,
 )
 def test_same_name_static_locals_from_prelink(
     tmp_path,
     keep_shared_flags,
-    expected_shared_lines,
-    expected_removed_count,
 ):
     """Incremental links should still scope same-name static removals."""
+    expected_shared_lines = sorted(
+        f"{stem}.o:shared"
+        for stem, keep in zip(SAME_NAME_STEMS, keep_shared_flags)
+        if not keep
+    )
     lines, removed_shared_count, stderr_text = build_same_name_static_prelink_case(
         tmp_path,
         keep_shared_flags,
     )
 
-    assert removed_shared_count == expected_removed_count
+    assert removed_shared_count == len(expected_shared_lines)
     assert sorted(lines) == expected_shared_lines
     assert "warning:" not in stderr_text
 
