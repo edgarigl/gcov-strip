@@ -242,9 +242,6 @@ def build_same_name_static_prelink_case(tmp_path, keep_shared_flags):
         "-O2",
         "-g",
         "-fno-inline",
-        "-fno-ipa-cp",
-        "-fno-ipa-sra",
-        "-fno-tree-ccp",
         "-ffunction-sections",
         "-fprofile-arcs",
         "-ftest-coverage",
@@ -369,6 +366,336 @@ def build_same_name_static_prelink_case(tmp_path, keep_shared_flags):
             lines.append(line)
 
     return lines, removed_shared_count, script_result.stderr
+
+
+def build_same_name_prelink_archive_case(tmp_path):
+    """Build one prelink.o case with a same-name local in an unlinked archive."""
+    cc = os.environ.get("CC", "gcc")
+    if shutil.which(cc) is None:
+        pytest.skip(f"{cc} not found")
+
+    cflags = [
+        "-Wall",
+        "-O2",
+        "-g",
+        "-fno-inline",
+        "-fno-ipa-cp",
+        "-fno-ipa-sra",
+        "-fno-tree-ccp",
+        "-ffunction-sections",
+        "-fprofile-arcs",
+        "-ftest-coverage",
+    ]
+    ldflags = [
+        "-coverage",
+        "-Wl,--gc-sections",
+        "-Wl,--print-gc-sections",
+        "-Wl,-Map=link.map",
+    ]
+
+    (tmp_path / "user.c").write_text(
+        "\n".join(
+            [
+                "__attribute__((noinline)) int escape(int);",
+                "static volatile int user_bias = 1;",
+                "",
+                "__attribute__((noinline)) static int merge(int value)",
+                "{",
+                "    return value + user_bias;",
+                "}",
+                "",
+                "__attribute__((noinline)) int user_live(void)",
+                "{",
+                "    return 1;",
+                "}",
+                "",
+                "__attribute__((noinline)) int user_dead(void)",
+                "{",
+                "    return escape(merge(11));",
+                "}",
+                "",
+                "__attribute__((noinline)) int user_anchor(void)",
+                "{",
+                "    return 7;",
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "libdup.c").write_text(
+        "\n".join(
+            [
+                "static volatile int libdup_bias = 2;",
+                "",
+                "__attribute__((noinline)) static int merge(int value)",
+                "{",
+                "    return value + libdup_bias;",
+                "}",
+                "",
+                "__attribute__((noinline)) int libdup_helper(void)",
+                "{",
+                "    return merge(3);",
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "escape.c").write_text(
+        "\n".join(
+            [
+                "__attribute__((noinline)) int escape(int value)",
+                "{",
+                "    return value;",
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "main.c").write_text(
+        "\n".join(
+            [
+                "int user_live(void);",
+                "int user_anchor(void);",
+                "",
+                "int main(void)",
+                "{",
+                "    return user_live() + user_anchor();",
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    for source_name in ("user", "libdup", "escape", "main"):
+        run_command(
+            [cc, *cflags, "-c", f"{source_name}.c", "-o", f"{source_name}.o"],
+            tmp_path,
+        )
+
+    run_command(
+        ["ar", "rcs", "libstuff.a", "libdup.o"],
+        tmp_path,
+    )
+    run_command(
+        [
+            cc,
+            "-r",
+            "-Wl,--unique=.text.*",
+            "-o",
+            "prelink.o",
+            "user.o",
+            "escape.o",
+        ],
+        tmp_path,
+    )
+
+    link_result = subprocess.run(
+        [
+            cc,
+            *ldflags,
+            "-o",
+            "app",
+            "main.o",
+            "prelink.o",
+            "libstuff.a",
+        ],
+        cwd=tmp_path,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    output_path = tmp_path / "funcs-removed.cfg"
+    subprocess.run(
+        [
+            sys.executable,
+            str(script_path()),
+            "--quiet",
+            "--dwarf",
+            "app",
+            "--linker-map",
+            "link.map",
+            "-o",
+            output_path.name,
+        ],
+        cwd=tmp_path,
+        input=link_result.stderr,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    return output_path.read_text(encoding="utf-8").splitlines()
+
+
+def write_constprop_prelink_source(path, stem, produce_clone, bias):
+    """Write one source file that may emit a constprop clone for `_read_lock`."""
+    lines = [
+        "extern volatile int runtime_arg;",
+        f"static volatile int {stem}_bias = {bias};",
+        "",
+        "__attribute__((noinline)) static int _read_lock(int value)",
+        "{",
+        f"    return value + {stem}_bias;",
+        "}",
+        "",
+        f"__attribute__((noinline)) int {stem}_live(void)",
+        "{",
+        "    return _read_lock(runtime_arg);",
+        "}",
+        "",
+    ]
+
+    if produce_clone:
+        lines.extend(
+            [
+                "__attribute__((noinline)) int "
+                f"{stem}_dead(void)",
+                "{",
+                "    return _read_lock(0);",
+                "}",
+                "",
+                "__attribute__((used, section(\".text._read_lock.constprop.0\"))) "
+                f"static int {stem}_clone(int value) asm(\"_read_lock.constprop.0\");",
+                "__attribute__((used, section(\".text._read_lock.constprop.0\"))) "
+                f"static int {stem}_clone(int value)",
+                "{",
+                f"    return value + {stem}_bias;",
+                "}",
+                "",
+            ]
+        )
+
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def build_same_name_prelink_constprop_case(tmp_path):
+    """Build a prelink.o case where only one object emits a constprop clone."""
+    cc = os.environ.get("CC", "gcc")
+    if shutil.which(cc) is None:
+        pytest.skip(f"{cc} not found")
+
+    sources = [
+        ("tree", True, 7),
+        ("event", False, 3),
+        ("range", False, 5),
+    ]
+    cflags = [
+        "-Wall",
+        "-O2",
+        "-g",
+        "-fno-inline",
+        "-fno-ipa-cp",
+        "-fno-ipa-sra",
+        "-fno-tree-ccp",
+        "-ffunction-sections",
+        "-fprofile-arcs",
+        "-ftest-coverage",
+    ]
+    ldflags = [
+        "-coverage",
+        "-Wl,--gc-sections",
+        "-Wl,--print-gc-sections",
+    ]
+
+    (tmp_path / "globals.c").write_text(
+        "volatile int runtime_arg;\n",
+        encoding="utf-8",
+    )
+    run_command(
+        [cc, *cflags, "-c", "globals.c", "-o", "globals.o"],
+        tmp_path,
+    )
+
+    for stem, produce_clone, bias in sources:
+        write_constprop_prelink_source(tmp_path / f"{stem}.c", stem, produce_clone, bias)
+        run_command(
+            [cc, *cflags, "-c", f"{stem}.c", "-o", f"{stem}.o"],
+            tmp_path,
+        )
+
+    (tmp_path / "main.c").write_text(
+        "\n".join(
+            [
+                "extern volatile int runtime_arg;",
+                "int tree_live(void);",
+                "int event_live(void);",
+                "int range_live(void);",
+                "",
+                "int main(void)",
+                "{",
+                "    runtime_arg = 11;",
+                "    return tree_live() + event_live() + range_live();",
+                "}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    run_command(
+        [cc, *cflags, "-c", "main.c", "-o", "main.o"],
+        tmp_path,
+    )
+
+    run_command(
+        [
+            cc,
+            "-r",
+            "-Wl,--unique=.text.*",
+            "-o",
+            "prelink.o",
+            "tree.o",
+            "event.o",
+            "range.o",
+            "globals.o",
+        ],
+        tmp_path,
+    )
+
+    link_result = subprocess.run(
+        [
+            cc,
+            *ldflags,
+            "-o",
+            "app",
+            "main.o",
+            "prelink.o",
+        ],
+        cwd=tmp_path,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    output_path = tmp_path / "funcs-removed.cfg"
+    script_result = subprocess.run(
+        [
+            sys.executable,
+            str(script_path()),
+            "--quiet",
+            "-o",
+            output_path.name,
+        ],
+        cwd=tmp_path,
+        input=link_result.stderr,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    return (
+        output_path.read_text(encoding="utf-8").splitlines(),
+        script_result.stderr,
+        link_result.stderr,
+    )
 
 
 def test_parse_text_section_name_keeps_clone_removals():
@@ -1017,6 +1344,35 @@ def test_same_name_static_locals_from_prelink(
     assert removed_shared_count == expected_removed_count
     assert sorted(lines) == expected_shared_lines
     assert "warning:" not in stderr_text
+
+
+def test_same_name_static_local_does_not_resolve_to_unlinked_archive_member(tmp_path):
+    """Prelink removals should not get attributed to an archive member not linked."""
+    lines = build_same_name_prelink_archive_case(tmp_path)
+
+    non_comment_lines = []
+    for line in lines:
+        if not line or line.startswith("#"):
+            continue
+        non_comment_lines.append(line)
+
+    assert "user.o:merge" in non_comment_lines
+    assert "libdup.o:*" in non_comment_lines
+    assert "libdup.o:merge" not in non_comment_lines
+
+
+def test_constprop_clone_removal_is_not_misattributed(tmp_path):
+    """Constprop clones removed from prelink.o should not strip other objects."""
+    lines, stderr_text, link_stderr = build_same_name_prelink_constprop_case(tmp_path)
+
+    non_comment_lines = [
+        line for line in lines if line and not line.startswith("#")
+    ]
+
+    assert ".text._read_lock.constprop" in link_stderr
+    assert "event.o:_read_lock" not in non_comment_lines
+    assert "range.o:_read_lock" not in non_comment_lines
+    assert "Skipping gcno removal for _read_lock from tree.o" in stderr_text
 
 
 def test_main_writes_clone_suppression_fixture(tmp_path, monkeypatch):
