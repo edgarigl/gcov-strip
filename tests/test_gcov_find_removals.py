@@ -860,6 +860,88 @@ def test_resolve_linker_map_gcno_removals_warns_for_missing_archive(tmp_path, mo
     ]
 
 
+@pytest.mark.parametrize(
+    (
+        "foo_bodies",
+        "symbol_name",
+        "is_unlikely",
+        "expect_line",
+        "expected_warning_substring",
+    ),
+    [
+        ({"foo"}, "foo", False, True, None),
+        ({"foo.cold"}, "foo", True, True, None),
+        ({"foo", "foo.clone.1"}, "foo.clone.1", False, False, "still share coverage"),
+        ({"foo.real"}, "foo.clone", False, False, "does not match emitted body"),
+    ],
+    ids=[
+        "direct-match",
+        "cold-match",
+        "clone-still-live",
+        "raw-mismatch",
+    ],
+)
+def test_resolve_removed_entries_respects_preferred_object_matching(
+    tmp_path,
+    monkeypatch,
+    foo_bodies,
+    symbol_name,
+    is_unlikely,
+    expect_line,
+    expected_warning_substring,
+):
+    """Preferred object hints should only emit removals when raw bodies align."""
+    module = load_script_module()
+
+    leaf_object = "leaf.o"
+    leaf_gcno = tmp_path / "leaf.gcno"
+    leaf_gcno.write_bytes(b"")
+
+    def fake_build_symbol_indexes(_root, names):
+        gcno_backed = defaultdict(set)
+        all_leaf = defaultdict(set)
+        bodies = defaultdict(lambda: defaultdict(set))
+
+        for name in names:
+            gcno_backed[name].add(leaf_object)
+            all_leaf[name].add(leaf_object)
+
+        bodies[leaf_object]["anchor"].add("anchor")
+        if "foo" in names:
+            for body in foo_bodies:
+                bodies[leaf_object]["foo"].add(body)
+
+        return gcno_backed, all_leaf, bodies
+
+    monkeypatch.setattr(module, "build_symbol_indexes", fake_build_symbol_indexes)
+    monkeypatch.setattr(
+        module,
+        "matching_gcno_path",
+        lambda path: str(leaf_gcno) if path == leaf_object else None,
+    )
+
+    entries = [
+        module.RemovalEntry("anchor", "prelink.o", "anchor"),
+        module.RemovalEntry("foo", "prelink.o", symbol_name, is_unlikely),
+    ]
+
+    lines, warnings, _reviews = module.resolve_removed_entries(
+        entries,
+        False,
+        module.DwarfResolutionState(set(), set()),
+    )
+
+    assert f"{leaf_object}:anchor" in lines
+    if expect_line:
+        assert f"{leaf_object}:foo" in lines
+        assert not warnings or all(
+            "Skipping gcno removal for foo" not in warning for warning in warnings
+        )
+    else:
+        assert f"{leaf_object}:foo" not in lines
+        assert any(expected_warning_substring in warning for warning in warnings)
+
+
 @pytest.mark.xfail(
     reason="Linker map parser still rebases entries onto the map directory (staging-only fix).",
     strict=False,
