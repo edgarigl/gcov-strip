@@ -1314,6 +1314,84 @@ def test_resolve_removed_entries_reports_ambiguous_review(monkeypatch):
     ]
 
 
+@pytest.mark.xfail(
+    reason="same-origin sibling hints can choose the wrong same-name object",
+)
+def test_resolve_removed_entries_sibling_hint_does_not_prove_same_name(monkeypatch):
+    """Sibling removals should not turn an ambiguous same-name removal active."""
+    module = load_script_module()
+
+    monkeypatch.setattr(
+        module,
+        "matching_gcno_path",
+        lambda path: {
+            "one.o": "one.gcno",
+            "two.o": "two.gcno",
+            "three.o": "three.gcno",
+        }.get(path),
+    )
+    monkeypatch.setattr(
+        module,
+        "build_symbol_indexes",
+        lambda _root, _names: (
+            defaultdict(
+                set,
+                {
+                    "one_dead": {"one.o"},
+                    "two_dead": {"two.o"},
+                    "shared": {"one.o", "two.o", "three.o"},
+                },
+            ),
+            defaultdict(
+                set,
+                {
+                    "one_dead": {"one.o"},
+                    "two_dead": {"two.o"},
+                    "shared": {"one.o", "two.o", "three.o"},
+                },
+            ),
+            defaultdict(
+                lambda: defaultdict(set),
+                {
+                    "one.o": defaultdict(
+                        set,
+                        {"one_dead": {"one_dead"}, "shared": {"shared"}},
+                    ),
+                    "two.o": defaultdict(
+                        set,
+                        {"two_dead": {"two_dead"}, "shared": {"shared"}},
+                    ),
+                    "three.o": defaultdict(set, {"shared": {"shared"}}),
+                },
+            ),
+        ),
+    )
+
+    lines, warnings, review_lines = module.resolve_removed_entries(
+        [
+            module.RemovalEntry("one_dead", "prelink.o", "one_dead"),
+            module.RemovalEntry("two_dead", "prelink.o", "two_dead"),
+            module.RemovalEntry("shared", "prelink.o", "shared"),
+        ],
+        False,
+    )
+
+    assert lines == [
+        "one.o:one_dead",
+        "two.o:two_dead",
+    ]
+    assert warnings == [
+        "Ambiguous removal for shared: prelink.o matches multiple leaf objects "
+        "(one.o, two.o, three.o)"
+    ]
+    assert review_lines == [
+        "# REVIEW ambiguous removal for shared from prelink.o",
+        "# candidates: one.o, two.o, three.o",
+        "# shared",
+        "",
+    ]
+
+
 def test_resolve_removed_entries_strict_raises_on_ambiguous(monkeypatch):
     """Strict mode should fail instead of emitting a review block."""
     module = load_script_module()
