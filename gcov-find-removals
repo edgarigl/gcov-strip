@@ -229,7 +229,7 @@ def parse_text_section_name(
     if not section.startswith(".text."):
         return None
 
-    parts = clean_name(section[len(".text.") :]).split(".")
+    parts = clean_name(section[len(".text."):]).split(".")
     while len(parts) > 1 and parts[0] in TEXT_SECTION_PREFIXES:
         parts = parts[1:]
 
@@ -442,6 +442,7 @@ def iter_archive_paths(root: str) -> Iterable[str]:
             if filename.endswith(".a"):
                 yield os.path.join(base, filename)
 
+
 def filter_project_archives(
     included: Set[Tuple[str, str]],
     root: str,
@@ -454,6 +455,7 @@ def filter_project_archives(
         if absolute_archive_path.startswith(project_prefix):
             filtered.add((archive_path, member))
     return filtered
+
 
 def collect_archive_paths(root: str) -> Set[str]:
     """Return normalized archive paths found under `root`."""
