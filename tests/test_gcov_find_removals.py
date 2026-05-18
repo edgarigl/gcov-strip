@@ -706,30 +706,52 @@ def build_same_name_prelink_constprop_case(tmp_path):
     )
 
 
-def test_parse_text_section_name_keeps_clone_removals():
-    """Clone-suffixed discarded sections should keep their raw symbol spelling."""
+def test_section2sym_map_reads_objdump_sections(monkeypatch):
+    """Objdump output should map each text section to its owning symbols."""
     module = load_script_module()
 
-    assert module.parse_text_section_name(".text.foo.constprop.0") == "foo.constprop.0"
-    assert module.parse_text_section_name(".text.foo.isra.3") == "foo.isra.3"
-    assert (
-        module.parse_text_section_name(
-            ".text.do_deprecated_hypercall.isra.0",
+    def fake_check_output(args, **_kwargs):
+        assert args == ["objdump", "-t", "prelink.o"]
+        return "\n".join(
+            [
+                "0000000000000000 l     F .text.foo.constprop.0 "
+                "000000000000000c foo.constprop.0",
+                "0000000000000000 g     F .init.text.foo.42 "
+                "0000000000000010 init_func",
+                "0000000000000000 g     F .text 0000000000000010 first",
+                "0000000000000000 g     F .text 0000000000000010 first",
+                "0000000000000010 g     F .text 0000000000000010 second",
+                "0000000000000000 g     O .data 0000000000000008 data_sym",
+            ]
         )
-        == "do_deprecated_hypercall.isra.0"
+
+    monkeypatch.setattr(module.subprocess, "check_output", fake_check_output)
+
+    assert module.section2sym_map("prelink.o") == {
+        ".text.foo.constprop.0": ["foo.constprop.0"],
+        ".init.text.foo.42": ["init_func"],
+        ".text": ["first", "second"],
+    }
+
+
+def test_extract_functions_emits_each_section_symbol(monkeypatch):
+    """Each symbol in a removed section should become a removal candidate."""
+    module = load_script_module()
+
+    def fake_section2sym_map(_obj_path):
+        return {".text": ["func_a", "func_b"]}
+
+    monkeypatch.setattr(module, "section2sym_map", fake_section2sym_map)
+
+    entries = module.extract_functions(
+        ["ld: removing unused section '.text' in file 'prelink.o'\n"],
+        False,
     )
-    assert module.parse_text_section_name(".text.foo.part.7") == "foo.part.7"
-    assert module.parse_text_section_name(".text.foo.cold") == "foo.cold"
-    assert (
-        module.parse_text_section_name(".text.unlikely.foo.constprop.0")
-        == "foo.constprop.0"
-    )
-    assert (
-        module.parse_text_section_name(
-            ".text.unlikely.__dt_translate_address.constprop.0",
-        )
-        == "__dt_translate_address.constprop.0"
-    )
+
+    assert entries == [
+        module.RemovalEntry("func_a", "prelink.o", "func_a"),
+        module.RemovalEntry("func_b", "prelink.o", "func_b"),
+    ]
 
 
 def test_normalize_name_strips_stacked_clone_suffixes():
@@ -741,9 +763,18 @@ def test_normalize_name_strips_stacked_clone_suffixes():
     assert module.normalize_name("foo.part.1.clone.2.cold") == "foo"
 
 
-def test_extract_functions_from_fixture_log():
+def test_extract_functions_from_fixture_log(monkeypatch):
     """Linker logs on disk should parse into raw removed-body entries."""
     module = load_script_module()
+
+    def fake_section2sym_map(_obj_path):
+        return {
+            ".text.helper.constprop.0": ["helper.constprop.0"],
+            ".text.helper": ["helper"],
+            ".text.unlikely.foo.constprop.0": ["foo.constprop.0"],
+        }
+
+    monkeypatch.setattr(module, "section2sym_map", fake_section2sym_map)
 
     log_path = FIXTURES_DIR / "ld" / "extract-removals.log"
 
@@ -1002,9 +1033,19 @@ def test_merge_config_lines_prefers_whole_object_directives():
     ) == ["bar.o:baz", "foo.o:*"]
 
 
-def test_extract_functions_ignores_generated_gcov_wrappers():
+def test_extract_functions_ignores_generated_gcov_wrappers(monkeypatch):
     """GCC-generated gcov wrappers should not become gcov removals."""
     module = load_script_module()
+
+    def fake_section2sym_map(_obj_path):
+        return {
+            ".text.startup._sub_I_00100_0": ["_sub_I_00100_0"],
+            ".text.exit._sub_D_00100_1": ["_sub_D_00100_1"],
+            ".text.__gcov_init": ["__gcov_init"],
+            ".text.__gcov_exit": ["__gcov_exit"],
+        }
+
+    monkeypatch.setattr(module, "section2sym_map", fake_section2sym_map)
 
     entries = module.extract_functions(
         [
@@ -1607,6 +1648,13 @@ def test_main_writes_clone_suppression_fixture(tmp_path, monkeypatch):
                 },
             ),
         ),
+    )
+    monkeypatch.setattr(
+        module,
+        "section2sym_map",
+        lambda _obj_path: {
+            ".text.helper.constprop.0": ["helper.constprop.0"],
+        },
     )
     monkeypatch.setattr(sys, "stdin", io.StringIO(log_path.read_text(encoding="utf-8")))
     monkeypatch.setattr(
