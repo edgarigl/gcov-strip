@@ -212,25 +212,22 @@ def extract_functions(
 
         section, obj_path = match.groups()
         norm_obj_path = normalize_object_path(obj_path)
-        # A section that owns exactly one function symbol resolves
-        # unambiguously; bare/shared sections (`.text`, `.init.text`) with
-        # multiple symbols are skipped because we cannot attribute a single
-        # gcno removal to them.
+        # A removed section can own one or more function symbols. Create a
+        # removal candidate for each name and let the object resolver decide
+        # whether it can be scoped to concrete gcno files.
         syms = section2sym_map(norm_obj_path).get(section, [])
-        if len(syms) != 1:
-            continue
-        symbol_name = syms[0]
-        if GENERATED_GCOV_WRAPPER_RE.match(symbol_name):
-            continue
-        entry = RemovalEntry(
-            normalize_name(symbol_name),
-            norm_obj_path,
-            symbol_name,
-            section.startswith(".text.unlikely."),
-        )
-        if entry not in seen:
-            seen.add(entry)
-            functions.append(entry)
+        for symbol_name in syms:
+            if GENERATED_GCOV_WRAPPER_RE.match(symbol_name):
+                continue
+            entry = RemovalEntry(
+                normalize_name(symbol_name),
+                norm_obj_path,
+                symbol_name,
+                section.startswith(".text.unlikely."),
+            )
+            if entry not in seen:
+                seen.add(entry)
+                functions.append(entry)
     return functions
 
 
@@ -262,7 +259,10 @@ def section2sym_map(obj_path: str) -> Dict[str, List[str]]:
     for line in output.splitlines():
         match = OBJDUMP_FUNC_SYM_RE.match(line)
         if match:
-            mapping[match.group("section")].append(match.group("name"))
+            section = match.group("section")
+            name = match.group("name")
+            if name not in mapping[section]:
+                mapping[section].append(name)
     return dict(mapping)
 
 
