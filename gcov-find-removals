@@ -33,6 +33,7 @@ import subprocess
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import cache
 from itertools import batched
 from typing import DefaultDict, Dict, Iterable, List, NamedTuple, Optional, Set, Tuple
 
@@ -128,6 +129,12 @@ REMOVAL_RE = re.compile(
     r"removing unused section '([^']+)' in file '([^']+)'", re.IGNORECASE
 )
 ARCHIVE_MEMBER_RE = re.compile(r"^(?P<archive>\S+\.a)\((?P<member>[^)]+)\)")
+# `objdump -t` function line: `<value> <7-char flag block ending in F> `
+# `<section> <size> [visibility] <name>`. The name is always the trailing
+# token, so any visibility marker is absorbed by `.+`.
+OBJDUMP_FUNC_SYM_RE = re.compile(
+    r"^[0-9a-fA-F]+ .{6}F (?P<section>\S+)\s+[0-9a-fA-F]+\s+.*?(?P<name>\S+)$"
+)
 CLONE_SUFFIXES = (
     "constprop",
     "isra",
@@ -181,7 +188,6 @@ NM_LINE_RE = re.compile(
     r"^(?:[0-9A-Fa-f]+\s+)?(?P<type>[A-Za-z])\s+(?P<name>\S+)$"
 )
 NM_BATCH_SIZE = 64
-TEXT_SECTION_PREFIXES = ("unlikely", "startup", "hot", "exit")
 # GCC-generated gcov constructor/destructor wrappers. These do not have
 # their own gcno function records, so ignore them when translating linker
 # removals into gcno stripping candidates.
@@ -205,14 +211,20 @@ def extract_functions(
             continue
 
         section, obj_path = match.groups()
-        symbol_name = parse_text_section_name(section)
-        if symbol_name is None:
+        norm_obj_path = normalize_object_path(obj_path)
+        # A section that owns exactly one function symbol resolves
+        # unambiguously; bare/shared sections (`.text`, `.init.text`) with
+        # multiple symbols are skipped because we cannot attribute a single
+        # gcno removal to them.
+        syms = section2sym_map(norm_obj_path).get(section, [])
+        if len(syms) != 1:
             continue
+        symbol_name = syms[0]
         if GENERATED_GCOV_WRAPPER_RE.match(symbol_name):
             continue
         entry = RemovalEntry(
             normalize_name(symbol_name),
-            normalize_object_path(obj_path),
+            norm_obj_path,
             symbol_name,
             section.startswith(".text.unlikely."),
         )
@@ -222,23 +234,36 @@ def extract_functions(
     return functions
 
 
-def parse_text_section_name(
-    section: str,
-) -> Optional[str]:
-    """Parse `.text` section names conservatively into raw symbol names."""
-    if not section.startswith(".text."):
-        return None
+@cache
+def section2sym_map(obj_path: str) -> Dict[str, List[str]]:
+    """Map `section -> list of function symbols` from `objdump -t` output."""
+    # The linker prints `obj_path` relative to where `make` ran (xen/ for the
+    # hypervisor prelink). Fall back to xen/<path> when run from the worktree
+    # root so the lookup works without a build-side symlink dance.
+    candidates = [obj_path]
+    if not os.path.isabs(obj_path) and not obj_path.startswith("xen/"):
+        candidates.append(os.path.join("xen", obj_path))
 
-    parts = clean_name(section[len(".text."):]).split(".")
-    while len(parts) > 1 and parts[0] in TEXT_SECTION_PREFIXES:
-        parts = parts[1:]
+    for candidate in candidates:
+        try:
+            output = subprocess.check_output(
+                ["objdump", "-t", candidate],
+                text=True,
+                errors="replace",
+                stderr=subprocess.DEVNULL,
+            )
+            break
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            continue
+    else:
+        return {}
 
-    name = ".".join(parts)
-    if not name:
-        return None
-    if "." in normalize_name(name):
-        return None
-    return clean_name(name)
+    mapping = defaultdict(list)
+    for line in output.splitlines():
+        match = OBJDUMP_FUNC_SYM_RE.match(line)
+        if match:
+            mapping[match.group("section")].append(match.group("name"))
+    return dict(mapping)
 
 
 def normalize_object_path(path: str) -> str:
